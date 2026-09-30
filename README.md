@@ -11,32 +11,34 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone https://github.com/valentina-blackledge/pgremedy.git
 cd pgremedy
-uv sync
+uv tool install .
 ```
+
+This puts `pgremedy` on your PATH so you can run it from anywhere.
 
 ## Usage
 
 ```bash
 # Look up a specific CVE
-uv run python -m pgremedy lookup CVE-2024-10978
+pgremedy lookup CVE-2024-10978
 
 # Audit a PostgreSQL version for known CVEs
-uv run python -m pgremedy audit 17
+pgremedy audit 17
 
 # Audit a Red Hat package (golang, openssl, glibc, etc.)
-uv run python -m pgremedy audit-package golang --severity important --days-ago 180
+pgremedy audit-package golang --severity important --days-ago 180
 
 # Scan a live PostgreSQL instance
-uv run python -m pgremedy scan "postgresql://user:pass@host:5432/dbname"
+pgremedy scan "postgresql://user:pass@host:5432/dbname"
 
 # Generate remediation steps for a CVE
-uv run python -m pgremedy remedy CVE-2024-10978 --pg-version 16.2
+pgremedy remedy CVE-2024-10978 --pg-version 16.2
 
 # Watch for new CVEs (single check)
-uv run python -m pgremedy watch --versions 16,17 --once
+pgremedy watch --versions 16,17 --once
 
 # Watch continuously (polls every hour)
-uv run python -m pgremedy watch --versions 16,17
+pgremedy watch --versions 16,17
 ```
 
 All commands support `--format json` for machine-readable output.

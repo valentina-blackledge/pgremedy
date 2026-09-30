@@ -173,7 +173,62 @@ def _report_to_dict(report: CVEReport) -> dict:
     return asdict(report)
 
 
+LOOKUP_EXAMPLES = """
+\b
+Examples:
+  pgremedy lookup CVE-2024-10978
+  pgremedy lookup CVE-2026-33811 --type golang
+  pgremedy lookup CVE-2024-10978 --format json
+"""
+
+AUDIT_EXAMPLES = """
+\b
+Examples:
+  pgremedy audit 17
+  pgremedy audit 16.2 --severity critical,high
+  pgremedy audit 14.9 --format json
+"""
+
+AUDIT_PACKAGE_EXAMPLES = """
+\b
+Examples:
+  pgremedy audit-package golang
+  pgremedy audit-package openssl --severity critical
+  pgremedy audit-package glibc --days-ago 180
+"""
+
+SCAN_EXAMPLES = """
+\b
+Examples:
+  pgremedy scan "postgresql://user:pass@localhost:5432/mydb"
+  pgremedy scan "host=db.example.com port=5432 dbname=prod user=admin"
+  pgremedy scan "service=my_pg_service" --severity-min high
+"""
+
+REMEDY_EXAMPLES = """
+\b
+Examples:
+  pgremedy remedy CVE-2024-10978
+  pgremedy remedy CVE-2024-10978 --pg-version 16.2
+  pgremedy remedy CVE-2024-10979 --pg-version 17.0 --format json
+"""
+
+WATCH_EXAMPLES = """
+\b
+Examples:
+  pgremedy watch --versions 16,17 --once
+  pgremedy watch --versions 17 --interval 1800
+  pgremedy watch --versions 14,15,16,17
+"""
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
+class ExamplesCommand(click.Command):
+    def format_epilog(self, ctx, formatter):
+        if self.epilog:
+            formatter.write(self.epilog)
+
 
 @click.group()
 @click.version_option(package_name="pgremedy")
@@ -181,7 +236,7 @@ def cli():
     """pgremedy — PostgreSQL CVE detection, remediation, and monitoring."""
 
 
-@cli.command()
+@cli.command(cls=ExamplesCommand, epilog=LOOKUP_EXAMPLES)
 @click.argument("cve_id")
 @click.option("--type", "forced_type", type=click.Choice(["postgresql", "golang", "base-image"]), help="Force CVE type.")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
@@ -194,7 +249,7 @@ def lookup(cve_id: str, forced_type: str | None, fmt: str):
         _print_report(report)
 
 
-@cli.command()
+@cli.command(cls=ExamplesCommand, epilog=AUDIT_EXAMPLES)
 @click.argument("pg_version")
 @click.option("--severity", help="Filter: critical,high,medium,low (comma-separated)")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
@@ -255,7 +310,7 @@ def audit(pg_version: str, severity: str | None, fmt: str):
     output.print("\n[dim]Run `pgremedy lookup <CVE-ID>` for full details.[/dim]")
 
 
-@cli.command("audit-package")
+@cli.command("audit-package", cls=ExamplesCommand, epilog=AUDIT_PACKAGE_EXAMPLES)
 @click.argument("package")
 @click.option("--severity", help="Filter: critical,important,moderate,low")
 @click.option("--days-ago", default=90, type=int, help="How far back to search.")
@@ -299,7 +354,7 @@ def audit_package(package: str, severity: str | None, days_ago: int, fmt: str):
     output.print("\n[dim]Run `pgremedy lookup <CVE-ID>` for full details.[/dim]")
 
 
-@cli.command()
+@cli.command(cls=ExamplesCommand, epilog=SCAN_EXAMPLES)
 @click.argument("conninfo")
 @click.option("--severity-min", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
@@ -339,7 +394,7 @@ def scan(conninfo: str, severity_min: str, fmt: str):
     output.print("\n[dim]Run `pgremedy remedy <CVE-ID> --pg-version " + result.pg_version + "` for fix steps.[/dim]")
 
 
-@cli.command()
+@cli.command(cls=ExamplesCommand, epilog=REMEDY_EXAMPLES)
 @click.argument("cve_id")
 @click.option("--pg-version", help="Your current PostgreSQL version.")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
@@ -401,7 +456,7 @@ def remedy(cve_id: str, pg_version: str | None, fmt: str):
         output.print()
 
 
-@cli.command()
+@cli.command(cls=ExamplesCommand, epilog=WATCH_EXAMPLES)
 @click.option("--versions", required=True, help="PG major versions to watch (comma-separated, e.g. 16,17)")
 @click.option("--interval", default=3600, type=int, help="Poll interval in seconds.")
 @click.option("--state-file", default="~/.pgremedy/watch.json", help="State file path.")
