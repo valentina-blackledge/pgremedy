@@ -230,10 +230,17 @@ class ExamplesCommand(click.Command):
             formatter.write(self.epilog)
 
 
-@click.group()
+MAIN_HELP = """
+pgremedy — PostgreSQL CVE detection, remediation, and monitoring.
+
+Run any command with --help for usage examples.
+"""
+
+
+@click.group(help=MAIN_HELP)
 @click.version_option(package_name="pgremedy")
 def cli():
-    """pgremedy — PostgreSQL CVE detection, remediation, and monitoring."""
+    pass
 
 
 @cli.command(cls=ExamplesCommand, epilog=LOOKUP_EXAMPLES)
