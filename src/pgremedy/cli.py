@@ -233,7 +233,11 @@ class ExamplesCommand(click.Command):
 MAIN_HELP = """
 pgremedy — PostgreSQL CVE detection, remediation, and monitoring.
 
-Run any command with --help for usage examples.
+\b
+For usage examples on any command, run:
+  pgremedy <command> --help
+  pgremedy scan --help
+  pgremedy remedy --help
 """
 
 
