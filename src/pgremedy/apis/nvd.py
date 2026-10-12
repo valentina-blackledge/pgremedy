@@ -260,8 +260,8 @@ def _range_of(match: dict[str, Any], fields: list[str]) -> _Range | None:
     return _Range(exact, True, exact, True) if exact is not None else None
 
 
-def postgresql_ranges(cve_data: dict) -> Iterator[_Range]:
-    """Vulnerable PostgreSQL server version ranges listed on a CVE."""
+def _vulnerable_cpe_matches(cve_data: dict) -> Iterator[tuple[dict[str, Any], list[str]]]:
+    """Each cpeMatch NVD marks as vulnerable, with its CPE split into fields."""
     for config in cve_data.get("configurations") or []:
         for node in config.get("nodes") or []:
             if node.get("negate"):
@@ -269,12 +269,40 @@ def postgresql_ranges(cve_data: dict) -> Iterator[_Range]:
             for match in node.get("cpeMatch") or []:
                 if not match.get("vulnerable"):
                     continue          # e.g. "runs on PostgreSQL" platform entries
-                fields = _CPE_SEPARATOR.split(match.get("criteria", "").lower())
-                if not _is_postgresql_server(fields):
-                    continue
-                rng = _range_of(match, fields)
-                if rng is not None:
-                    yield rng
+                yield match, _CPE_SEPARATOR.split(match.get("criteria", "").lower())
+
+
+def postgresql_ranges(cve_data: dict) -> Iterator[_Range]:
+    """Vulnerable PostgreSQL server version ranges listed on a CVE."""
+    for match, fields in _vulnerable_cpe_matches(cve_data):
+        if not _is_postgresql_server(fields):
+            continue
+        rng = _range_of(match, fields)
+        if rng is not None:
+            yield rng
+
+
+def has_affected_data(cve_data: dict) -> bool:
+    """False while NVD hasn't recorded affected products yet (e.g. "Awaiting Analysis")."""
+    return bool(cve_data.get("configurations"))
+
+
+def lists_postgresql_server(cve_data: dict) -> bool:
+    """True if NVD lists the PostgreSQL server itself as vulnerable."""
+    return any(_is_postgresql_server(fields) for _, fields in _vulnerable_cpe_matches(cve_data))
+
+
+def affected_products(cve_data: dict) -> list[str]:
+    """Vulnerable products as "product (vendor)", e.g. "postgresql_jdbc_driver (postgresql)"."""
+    names: list[str] = []
+    for _, fields in _vulnerable_cpe_matches(cve_data):
+        if len(fields) < 5:
+            continue
+        vendor, product = (field.replace("\\", "") for field in fields[3:5])   # CPEs escape e.g. "pl\/php"
+        name = f"{product} ({vendor})"
+        if name not in names:
+            names.append(name)
+    return names
 
 
 @dataclass(frozen=True)
@@ -310,24 +338,30 @@ def is_version_affected(pg_version: str, cve_data: dict) -> bool:
     return check_version(cve_data, pg_version).affected
 
 
-def find_fix_version(cve_data: dict, pg_version: str | None = None) -> str | None:
-    """The release that fixes this CVE in the user's branch.
+def fixes_by_branch(cve_data: dict) -> dict[str, str]:
+    """First fixed release per branch, oldest branch first: {"12": "12.21", ..., "17": "17.1"}.
 
-    Without pg_version, returns the highest fix across all branches.
+    A range that ends inside a branch (versionEndExcluding 16.5) gives that
+    branch's fix. Branches a range covers completely get no entry.
     """
     fix_map: dict[str, Version] = {}
     for rng in postgresql_ranges(cve_data):
         if rng.end is None or rng.end_inclusive:
             continue
         major = pgversion.major_of(rng.end)
-        if rng.start is not None and pgversion.major_of(rng.start) != major:
-            continue   # range spans branches; its start branch has no fix listed
         if major not in fix_map or rng.end > fix_map[major]:
             fix_map[major] = rng.end
+    return {major: str(fix) for major, fix in sorted(fix_map.items(), key=lambda item: item[1])}
 
-    if not fix_map:
+
+def find_fix_version(cve_data: dict, pg_version: str | None = None) -> str | None:
+    """The release that fixes this CVE in the user's branch.
+
+    Without pg_version, returns the highest fix across all branches.
+    """
+    fixes = fixes_by_branch(cve_data)
+    if not fixes:
         return None
     if pg_version:
-        fix = fix_map.get(pgversion.major_of(pg_version))
-        return str(fix) if fix else None
-    return str(max(fix_map.values()))
+        return fixes.get(pgversion.major_of(pg_version))
+    return max(fixes.values(), key=Version)

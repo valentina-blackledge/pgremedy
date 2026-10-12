@@ -63,6 +63,61 @@ class CVEReport:
 
 
 @dataclass
+class Finding:
+    level: str        # critical, warning, ok or info
+    message: str
+
+
+@dataclass
+class BranchFix:
+    """One row of remedy's per-branch table."""
+    major: str
+    affected: bool                 # NVD lists at least one release of this branch
+    fixed_in: str | None = None    # first fixed release, when NVD lists one
+    latest: str | None = None      # latest (or final) release, from postgresql.org
+    supported: bool | None = None
+    eol_date: str | None = None
+
+
+@dataclass
+class VersionAdvice:
+    """What a CVE means for one specific release (remedy --pg-version)."""
+    version: str
+    major: str
+    affected: bool | None = None   # None when the data can't tell (end-of-life branch, unanalyzed CVE)
+    fixed_in: str | None = None
+    upgrade_to: str | None = None
+    findings: list[Finding] = field(default_factory=list)
+
+
+@dataclass
+class Mitigation:
+    source: str
+    text: str
+
+
+@dataclass
+class RemediationReport:
+    cve_id: str
+    description: str = ""
+    severity: str = "UNKNOWN"
+    cvss_score: float | None = None
+    nvd_status: str | None = None
+    # postgresql-server: NVD lists the server; other-products: NVD lists only
+    # other products (drivers, tools, distro packages); not-analyzed: NVD hasn't
+    # recorded affected products yet.
+    scope: str = "postgresql-server"
+    other_products: list[str] = field(default_factory=list)
+    advisory_url: str | None = None
+    branches: list[BranchFix] = field(default_factory=list)
+    advice: VersionAdvice | None = None
+    mitigations: list[Mitigation] = field(default_factory=list)
+    redhat: RedHatInfo | None = None
+    crunchy: CrunchyInfo | None = None
+    source_errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class ScanResult:
     pg_version: str
     pg_version_num: int
