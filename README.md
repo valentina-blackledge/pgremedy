@@ -116,6 +116,12 @@ uv run pytest
 
 The tests use records copied from the live APIs (see `tests/fixtures/README.md`) and never touch the network.
 
+### Development Approach: Model Ping-Pong (MPP)
+
+I use an approach I call **Model Ping-Pong (MPP)**, exchanging ideas, code, and critiques between Claude, Snowflake Cortex AI, and OpenAI Codex to challenge assumptions, collaborate, and refine pgremedy.
+
+*— Valentina Blackledge, October 2026*
+
 ## License
 
 MIT
