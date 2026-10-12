@@ -13,6 +13,8 @@ reads. Each file in `nvd/` is the `cve` object NVD returns inside
 | `nvd/CVE-2010-3781.json` | PL/php add-on that lists PostgreSQL only as a non-vulnerable platform (`vulnerable: false`). |
 | `nvd/CVE-2024-1597.json` | pgjdbc (JDBC driver) CVE, CRITICAL. Vendor is `postgresql` but the product is `postgresql_jdbc_driver`, and its first range has no start ("< 42.2.28"), so a loose match would flag every server version. NVD's product query doesn't return it; the local product check is the backstop. |
 | `postgresql_org_versions.json` | Subset of https://www.postgresql.org/versions.json (9.6 and 12–18). |
+| `redhat/CVE-2026-6471.json` | Red Hat record with a real workaround. Structure as served (`mitigation` is `{"value", "lang"}`); the text is a paraphrase of Red Hat's, not a copy. |
+| `redhat/CVE-2024-7348.json` | Red Hat record whose mitigation is Red Hat's "not available" boilerplate (the opening words are copied; the rest is cut). |
 
 Descriptions are shortened. CVSS metrics are included only where they were
 checked against the live record; the others are omitted rather than guessed.

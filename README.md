@@ -29,11 +29,12 @@ pgremedy audit 17
 # Audit a Red Hat package (golang, openssl, glibc, etc.)
 pgremedy audit-package golang --severity important --days-ago 180
 
-# Scan a live PostgreSQL instance
-pgremedy scan "postgresql://user:pass@host:5432/dbname"
+# Scan a live PostgreSQL instance (-W prompts for the password)
+pgremedy scan "postgresql://user@host:5432/dbname" -W
 
-# Generate remediation steps for a CVE
+# How to fix a CVE: for one server, or for every branch
 pgremedy remedy CVE-2024-10978 --pg-version 16.2
+pgremedy remedy CVE-2024-10978
 
 # Watch for new CVEs (single check)
 pgremedy watch --versions 16,17 --once
@@ -79,16 +80,19 @@ Connects to a live PostgreSQL instance and reads its exact version (and lists in
 2. Matches the version against every PostgreSQL server CVE in NVD and lists the ones that apply, with the fixing release.
 
 Accepts any libpq connection string:
-- `postgresql://user:pass@host:5432/dbname`
+- `postgresql://user@host:5432/dbname`
 - `host=x port=5432 dbname=y user=z`
 - `service=myservice` (from pg_service.conf)
 
+Keep the password out of the connection string, because it ends up in your shell history and the process list. Use `-W` to be prompted for it, or let libpq read it from [`~/.pgpass`](https://www.postgresql.org/docs/current/libpq-pgpass.html) or a [service file](https://www.postgresql.org/docs/current/libpq-pgservice.html). pgremedy never prints the password: output shows the connection as `user@host:port/dbname`, and connection errors are scrubbed.
+
 ### `remedy <CVE-ID>`
-Generates remediation steps for a specific CVE:
-- **Upgrade path** -- branch-aware fix version (e.g., for PG 16.2 it finds the 16.x fix, not the 12.x fix)
-- **Config mitigations** -- pg_hba.conf changes, GUC settings, privilege hardening
-- **Red Hat patch status** -- backport and errata info
-- **Crunchy Data status** -- PGO release info
+Shows how to fix a CVE.
+
+- **With `--pg-version 16.2`:** tells you whether that release is affected, when the fix first shipped (16.5), and what to upgrade to. That's always the latest release of your branch (16.15), because minor releases are cumulative. End-of-life branches are flagged: they get no fixes, and NVD doesn't list them, so "not listed" doesn't mean safe.
+- **Without it:** a table of every affected branch with its first fixed release, latest release and support status.
+- **Workarounds:** shown only when a vendor documents one (currently Red Hat's mitigation text). pgremedy doesn't guess workarounds from the CVE description. For most PostgreSQL CVEs, upgrading is the fix.
+- **Also shown:** a link to the PostgreSQL advisory, Red Hat patch status and Crunchy PGO release info. CVEs in other products (drivers, distro packages) are named as such, and CVEs NVD hasn't analyzed yet are flagged.
 
 ### `watch --versions <MAJORS>`
 Monitors the given branches (`16,17`). The first run records a baseline of the CVEs already known for those branches without alerting. Later runs report:

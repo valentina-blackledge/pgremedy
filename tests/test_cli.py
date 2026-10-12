@@ -26,7 +26,8 @@ def server(monkeypatch):
         major, minor = version.split(".")
         num = int(major) * 10000 + int(minor)
         extensions = [{"name": "plpgsql", "default_version": "1.0", "installed_version": "1.0", "comment": ""}]
-        monkeypatch.setattr(scanner, "read_server", lambda conninfo: (f"{version} (Ubuntu {version}-1)", num, extensions))
+        info = scanner.ServerInfo(f"{version} (Ubuntu {version}-1)", num, extensions, "scanner@db:5432/postgres")
+        monkeypatch.setattr(scanner, "read_server", lambda conninfo, password=None: info)
     return serve
 
 
@@ -75,9 +76,9 @@ def test_scan_fails_closed_when_a_source_is_unreachable(world, server, source, n
 
 
 def test_scan_reports_database_errors_without_a_traceback(world, monkeypatch):
-    def refuse(conninfo):
+    def refuse(conninfo, **kwargs):
         raise psycopg.OperationalError('connection to server at "db", port 5432 failed: Connection refused')
-    monkeypatch.setattr(scanner, "read_server", refuse)
+    monkeypatch.setattr(psycopg, "connect", refuse)
     result = run("scan", "postgresql://scanner@db/postgres")
     assert result.exit_code == 2
     assert "couldn't connect to PostgreSQL" in flat(result.output)

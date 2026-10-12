@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
 import requests
 
+from pgremedy import branches
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 
 FIXTURES = Path(__file__).parent / "fixtures"
+TODAY = date(2026, 10, 12)   # the day the fixtures were copied; end-of-life checks count from it
 
 
 class FakeResponse:
@@ -71,6 +74,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(requests, "get", refuse)
     monkeypatch.setattr(nvd, "_sleep", lambda seconds: None)
     monkeypatch.setattr(nvd, "_last_request_at", None)
+    monkeypatch.setattr(branches, "_today", lambda: TODAY)
     monkeypatch.delenv("NVD_API_KEY", raising=False)
     monkeypatch.setenv("COLUMNS", "300")   # keep Rich from wrapping lines tests look for
 
@@ -92,10 +96,16 @@ def versions_json() -> list[dict]:
     return json.loads((FIXTURES / "postgresql_org_versions.json").read_text())
 
 
+@pytest.fixture
+def redhat_records() -> dict[str, dict]:
+    return {p.stem: json.loads(p.read_text()) for p in sorted((FIXTURES / "redhat").glob("*.json"))}
+
+
 class World:
-    """Healthy sources by default: NVD serves the fixture records, Red Hat has no
-    record, GitHub lists no releases. Tests change `product`, `modified` or
-    `versions`, or call `http.down(...)` to simulate an outage."""
+    """Healthy sources by default: NVD serves the fixture records, Red Hat serves
+    the records in `redhat` (404 otherwise), GitHub lists no releases. Tests
+    change `product`, `modified`, `versions` or `redhat`, or call
+    `http.down(...)` to simulate an outage."""
 
     def __init__(self, http: Router, records: dict[str, dict], versions: list[dict]):
         self.http = http
@@ -103,10 +113,15 @@ class World:
         self.product = list(records.values())
         self.modified: list[dict] = []
         self.versions = copy.deepcopy(versions)
+        self.redhat: dict[str, dict] = {}
         http.add(nvd.API_BASE, self._nvd)
         http.add(postgresql_org.VERSIONS_URL, lambda url, params: FakeResponse(200, self.versions))
-        http.add(redhat.CVE_API, lambda url, params: FakeResponse(404))
+        http.add(redhat.CVE_API, self._redhat)
         http.add(crunchy.RELEASES_API, lambda url, params: FakeResponse(200, []))
+
+    def _redhat(self, url, params):
+        record = self.redhat.get(url.rsplit("/", 1)[-1].removesuffix(".json"))
+        return FakeResponse(200, record) if record else FakeResponse(404)
 
     def _nvd(self, url, params):
         if "cveId" in params:

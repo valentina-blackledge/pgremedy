@@ -19,6 +19,10 @@ class SourceUnavailable(Exception):
         super().__init__(f"{source}: {reason}")
 
 
+class ConnectionFailed(Exception):
+    """Couldn't connect to or query PostgreSQL. The message never contains a password."""
+
+
 def describe(exc: BaseException) -> str:
     """A short, readable reason for a failed HTTP request."""
     if isinstance(exc, requests.exceptions.Timeout):

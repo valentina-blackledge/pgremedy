@@ -15,14 +15,13 @@ from rich.text import Text
 
 from pgremedy import branches, pgversion
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
-from pgremedy.errors import SourceUnavailable
+from pgremedy.errors import ConnectionFailed, SourceUnavailable
 from pgremedy.models import (
     CVEReport,
     CVSSInfo,
     CrunchyInfo,
     RedHatInfo,
-    RedHatPackageState,
-    RedHatPatch,
+    RemediationReport,
 )
 
 console = Console(stderr=True)
@@ -65,6 +64,18 @@ def _pg_version(ctx, param, value: str) -> str:
     return value.strip()
 
 
+def _pg_release(ctx, param, value: str | None) -> str | None:
+    """A specific release such as 16.4, not a branch such as 16."""
+    if value is None:
+        return None
+    if pgversion.parse(value) is None or pgversion.is_branch(value):
+        raise click.BadParameter(
+            f"'{value}' is not a specific release. Use the full version, e.g. 16.4 "
+            "(SHOW server_version on the server tells you)."
+        )
+    return value.strip()
+
+
 def _truncate(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width].rstrip() + "..."
 
@@ -97,24 +108,7 @@ def _build_report(cve_id: str, forced_type: str | None = None) -> CVEReport | No
         report.source_errors["redhat"] = exc.reason
         rh = None
     if rh:
-        report.redhat = RedHatInfo(
-            severity=rh.get("threat_severity", "Unknown"),
-            fix_state=rh.get("fix_state", "Unknown"),
-            upstream_fix=rh.get("upstream_fix"),
-            bugzilla_url=rh.get("bugzilla", {}).get("url"),
-            patches=[
-                RedHatPatch(package=ar.get("package", "N/A"), advisory=ar.get("advisory", "N/A"))
-                for ar in rh.get("affected_release", [])[:8]
-            ],
-            package_states=[
-                RedHatPackageState(
-                    package_name=ps.get("package_name", "N/A"),
-                    product_name=ps.get("product_name", ""),
-                    fix_state=ps.get("fix_state", "N/A"),
-                )
-                for ps in rh.get("package_state", [])[:8]
-            ],
-        )
+        report.redhat = redhat.to_info(rh)
 
     try:
         cr = crunchy.find_cve_in_releases(cve_id, crunchy.fetch_releases())
@@ -125,6 +119,121 @@ def _build_report(cve_id: str, forced_type: str | None = None) -> CVEReport | No
         report.crunchy = CrunchyInfo(**cr)
 
     return report
+
+
+def _print_redhat(rh: RedHatInfo | None, error: str | None) -> None:
+    output.print("[bold]Red Hat Status[/bold]")
+    if error:
+        output.print(f"  [yellow]Unavailable: couldn't reach Red Hat ({escape(error)})[/yellow]")
+    elif rh:
+        output.print(f"  Severity: {rh.severity}")
+        output.print(f"  Fix State: {rh.fix_state}")
+        if rh.upstream_fix:
+            output.print(f"  Upstream Fix: {escape(rh.upstream_fix)}")
+        if rh.bugzilla_url:
+            output.print(f"  Bugzilla: {rh.bugzilla_url}")
+        if rh.patches:
+            output.print("  Patched Packages:")
+            for p in rh.patches:
+                output.print(f"    {escape(p.package)} via {p.advisory}")
+        if rh.package_states:
+            output.print("  Package State:")
+            for ps in rh.package_states:
+                output.print(f"    {escape(ps.package_name)} ({escape(ps.product_name)}): {ps.fix_state}")
+    else:
+        output.print("  [dim]Red Hat has no record of this CVE[/dim]")
+    output.print()
+
+
+def _print_crunchy(cr: CrunchyInfo | None, error: str | None) -> None:
+    output.print("[bold]Crunchy Data Status[/bold]")
+    if error:
+        output.print(f"  [yellow]Unavailable: couldn't reach GitHub ({escape(error)})[/yellow]")
+    elif cr:
+        output.print(f"  PGO Release: {cr.release_tag} ({escape(cr.release_name or '')})")
+        output.print(f"  Published: {cr.published}")
+        if cr.prerelease:
+            output.print("  [yellow]Status: Pre-release (not yet GA)[/yellow]")
+        if cr.url:
+            output.print(f"  Details: {cr.url}")
+    else:
+        output.print("  [dim]No Crunchy advisory found[/dim]")
+    output.print()
+
+
+def _print_remediation(report: RemediationReport) -> None:
+    output.print()
+    output.rule(f"[bold]Remediation: {report.cve_id}[/bold]")
+    output.print()
+    output.print(f"[bold]Description:[/bold] {escape(report.description or 'N/A')}")
+    style = _severity_style(report.severity)
+    score = f" (CVSS {report.cvss_score})" if report.cvss_score is not None else ""
+    output.print(f"[bold]Severity:[/bold] [{style}]{report.severity}[/{style}]{score}")
+    output.print()
+
+    if report.scope == "not-analyzed":
+        output.print(
+            "[yellow]NVD hasn't recorded which products or versions this CVE affects yet "
+            f"(status: {escape(report.nvd_status or 'unknown')}).[/yellow]"
+        )
+        if report.advisory_url:
+            output.print(f"If it's a PostgreSQL server CVE, its advisory lists the fixed releases: {report.advisory_url}")
+        output.print()
+    elif report.scope == "other-products":
+        products = ", ".join(report.other_products) or "unnamed products"
+        output.print(
+            f"This CVE affects other products, not the PostgreSQL server: {escape(products)}. "
+            "Update those; the vendor status below may help."
+        )
+        output.print()
+
+    if report.advice:
+        output.print(f"[bold]Your version ({escape(report.advice.version)})[/bold]")
+        for finding in report.advice.findings:
+            level_style = ASSESSMENT_STYLES.get(finding.level, "default")
+            output.print(f"  [{level_style}]{escape(finding.message)}[/{level_style}]")
+        output.print()
+    elif report.branches:
+        t = Table(title="Fixed releases by branch", title_justify="left", title_style="bold")
+        t.add_column("Branch")
+        t.add_column("First fixed in")
+        t.add_column("Latest release")
+        t.add_column("Support")
+        for row in report.branches:
+            fixed = row.fixed_in or ("not listed" if row.affected else "not affected")
+            if row.supported:
+                support = f"until {row.eol_date}" if row.eol_date else "supported"
+                latest = row.latest or "?"
+            else:
+                support = Text(f"ended {row.eol_date}" if row.eol_date else "end-of-life", style="yellow")
+                latest = f"{row.latest} (final)" if row.latest else "?"
+            t.add_row(row.major, fixed, latest, support)
+        output.print(t)
+        output.print("[dim]Add --pg-version (e.g. 16.4) for advice on a specific server.[/dim]")
+        output.print()
+
+    if report.advisory_url and report.scope == "postgresql-server":
+        output.print(f"PostgreSQL advisory: {report.advisory_url}")
+        output.print()
+
+    output.print("[bold]Workarounds[/bold]")
+    if "redhat" in report.source_errors:
+        output.print(
+            f"  [yellow]Couldn't check Red Hat for a documented workaround "
+            f"({escape(report.source_errors['redhat'])}).[/yellow]"
+        )
+    elif report.mitigations:
+        for m in report.mitigations:
+            output.print(f"  From {escape(m.source)}:")
+            for line in m.text.splitlines():
+                if line.strip():
+                    output.print(f"    {escape(line.strip())}")
+    else:
+        output.print("  None documented by Red Hat. Upgrading is the fix.")
+    output.print()
+
+    _print_redhat(report.redhat, report.source_errors.get("redhat"))
+    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"))
 
 
 def _print_report(report: CVEReport) -> None:
@@ -149,43 +258,8 @@ def _print_report(report: CVEReport) -> None:
     output.print(t)
     output.print()
 
-    output.print("[bold]Red Hat Status[/bold]")
-    if "redhat" in report.source_errors:
-        output.print(f"  [yellow]Unavailable: couldn't reach Red Hat ({escape(report.source_errors['redhat'])})[/yellow]")
-    elif report.redhat:
-        rh = report.redhat
-        output.print(f"  Severity: {rh.severity}")
-        output.print(f"  Fix State: {rh.fix_state}")
-        if rh.upstream_fix:
-            output.print(f"  Upstream Fix: {escape(rh.upstream_fix)}")
-        if rh.bugzilla_url:
-            output.print(f"  Bugzilla: {rh.bugzilla_url}")
-        if rh.patches:
-            output.print("  Patched Packages:")
-            for p in rh.patches:
-                output.print(f"    {escape(p.package)} via {p.advisory}")
-        if rh.package_states:
-            output.print("  Package State:")
-            for ps in rh.package_states:
-                output.print(f"    {escape(ps.package_name)} ({escape(ps.product_name)}): {ps.fix_state}")
-    else:
-        output.print("  [dim]Red Hat has no record of this CVE[/dim]")
-    output.print()
-
-    output.print("[bold]Crunchy Data Status[/bold]")
-    if "crunchy" in report.source_errors:
-        output.print(f"  [yellow]Unavailable: couldn't reach GitHub ({escape(report.source_errors['crunchy'])})[/yellow]")
-    elif report.crunchy:
-        cr = report.crunchy
-        output.print(f"  PGO Release: {cr.release_tag} ({escape(cr.release_name or '')})")
-        output.print(f"  Published: {cr.published}")
-        if cr.prerelease:
-            output.print("  [yellow]Status: Pre-release (not yet GA)[/yellow]")
-        if cr.url:
-            output.print(f"  Details: {cr.url}")
-    else:
-        output.print("  [dim]No Crunchy advisory found[/dim]")
-    output.print()
+    _print_redhat(report.redhat, report.source_errors.get("redhat"))
+    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"))
 
     if report.references:
         output.print("[bold]References[/bold]")
@@ -221,16 +295,20 @@ Examples:
 SCAN_EXAMPLES = """
 \b
 Examples:
-  pgremedy scan "postgresql://user:pass@localhost:5432/mydb"
-  pgremedy scan "host=db.example.com port=5432 dbname=prod user=admin"
-  pgremedy scan "service=my_pg_service" --severity-min high
+  pgremedy scan "postgresql://admin@localhost:5432/mydb" -W     prompt for the password
+  pgremedy scan "host=db.example.com dbname=prod user=admin"    password from ~/.pgpass
+  pgremedy scan "service=my_pg_service" --severity-min high     settings from pg_service.conf
+
+\b
+Avoid putting the password in the connection string: it ends up in your
+shell history and the process list.
 """
 
 REMEDY_EXAMPLES = """
 \b
 Examples:
-  pgremedy remedy CVE-2024-10978
-  pgremedy remedy CVE-2024-10978 --pg-version 16.2
+  pgremedy remedy CVE-2024-10978                       fixed releases for every branch
+  pgremedy remedy CVE-2024-10978 --pg-version 16.2     advice for one server
   pgremedy remedy CVE-2024-10979 --pg-version 17.0 --format json
 """
 
@@ -264,9 +342,14 @@ class PgRemedyGroup(click.Group):
             )
             console.print("The check did not run, so this is not a clean result.")
             ctx.exit(EXIT_ERROR)
+        except ConnectionFailed as exc:
+            console.print(f"[bold red]Error:[/bold red] couldn't connect to PostgreSQL: {escape(str(exc))}")
+            ctx.exit(EXIT_ERROR)
         except psycopg.Error as exc:
-            reason = " ".join(str(exc).split())
-            console.print(f"[bold red]Error:[/bold red] couldn't connect to PostgreSQL: {escape(reason)}")
+            # The scanner converts database errors to ConnectionFailed with
+            # secrets removed. Anything that slips past it may quote the
+            # connection string, so print only its type.
+            console.print(f"[bold red]Error:[/bold red] database error ({type(exc).__name__}).")
             ctx.exit(EXIT_ERROR)
 
 
@@ -441,10 +524,13 @@ def audit_package(package: str, severity: str | None, days_ago: int, fmt: str):
 @click.argument("conninfo")
 @click.option("--severity-min", type=click.Choice(["low", "medium", "high", "critical"]), default="medium")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
-def scan(conninfo: str, severity_min: str, fmt: str):
+@click.option("-W", "--password-prompt", is_flag=True,
+              help="Prompt for the password instead of putting it in the connection string.")
+def scan(conninfo: str, severity_min: str, fmt: str, password_prompt: bool):
     """Scan a live PostgreSQL instance for CVEs."""
     from pgremedy.scanner import scan_instance
-    result = scan_instance(conninfo, severity_min=severity_min)
+    password = click.prompt("Password", hide_input=True, err=True) if password_prompt else None
+    result = scan_instance(conninfo, severity_min=severity_min, password=password)
 
     if fmt == "json":
         click.echo(json.dumps(asdict(result), indent=2, default=str))
@@ -493,76 +579,22 @@ def scan(conninfo: str, severity_min: str, fmt: str):
 
 @cli.command(cls=ExamplesCommand, epilog=REMEDY_EXAMPLES)
 @click.argument("cve_id", callback=_cve_id)
-@click.option("--pg-version", help="Your current PostgreSQL version.")
+@click.option("--pg-version", callback=_pg_release,
+              help="Your server's PostgreSQL release, e.g. 16.4 (SHOW server_version).")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.pass_context
 def remedy(ctx, cve_id: str, pg_version: str | None, fmt: str):
-    """Generate remediation steps for a CVE."""
+    """Show how to fix a CVE: the release to upgrade to, and documented workarounds."""
     from pgremedy.remediation import generate_remediation
-    result = generate_remediation(cve_id, pg_version=pg_version)
-
-    if fmt == "json":
-        click.echo(json.dumps(result, indent=2, default=str))
-        if result.get("error"):
-            ctx.exit(EXIT_ERROR)
-        return
-
-    output.print()
-    output.rule(f"[bold]Remediation: {cve_id}[/bold]")
-    output.print()
-
-    if result.get("error"):
-        output.print(f"[red]{escape(result['error'])}[/red]")
+    report = generate_remediation(cve_id, pg_version=pg_version)
+    if report is None:
+        console.print(f"[bold red]Error:[/bold red] NVD has no record of {cve_id}.")
         ctx.exit(EXIT_ERROR)
 
-    output.print(f"[bold]Description:[/bold] {escape(result.get('description', 'N/A'))}")
-    sev = result.get("severity", "UNKNOWN")
-    style = _severity_style(sev)
-    output.print(f"[bold]Severity:[/bold] [{style}]{sev}[/{style}]")
-    output.print()
-
-    upgrade = result.get("upgrade_path")
-    if upgrade:
-        output.print("[bold]Upgrade Path[/bold]")
-        output.print(f"  Current version: {upgrade.get('current', 'unknown')}")
-        output.print(f"  Fix version: {upgrade.get('fix_version', 'unknown')}")
-        output.print(f"  Action: {upgrade.get('action', 'Upgrade PostgreSQL')}")
-        output.print()
-
-    mitigations = result.get("mitigations", [])
-    if mitigations:
-        output.print("[bold]Mitigations[/bold]")
-        for i, m in enumerate(mitigations, 1):
-            output.print(f"  {i}. {escape(m)}")
-        output.print()
-
-    errors = result.get("source_errors", {})
-    rh = result.get("redhat_status")
-    if "redhat" in errors:
-        output.print("[bold]Red Hat Patch Status[/bold]")
-        output.print(f"  [yellow]Unavailable: couldn't reach Red Hat ({escape(errors['redhat'])})[/yellow]")
-        output.print()
-    elif rh:
-        output.print("[bold]Red Hat Patch Status[/bold]")
-        output.print(f"  Fix state: {rh.get('fix_state', 'Unknown')}")
-        if rh.get("upstream_fix"):
-            output.print(f"  Upstream fix: {escape(rh['upstream_fix'])}")
-        if rh.get("patches"):
-            output.print("  Patched packages:")
-            for p in rh["patches"]:
-                output.print(f"    {escape(p)}")
-        output.print()
-
-    cr = result.get("crunchy_status")
-    if "crunchy" in errors:
-        output.print("[bold]Crunchy Data Status[/bold]")
-        output.print(f"  [yellow]Unavailable: couldn't reach GitHub ({escape(errors['crunchy'])})[/yellow]")
-        output.print()
-    elif cr:
-        output.print("[bold]Crunchy Data Status[/bold]")
-        output.print(f"  Release: {cr.get('release_tag', 'N/A')}")
-        output.print(f"  Published: {cr.get('published', 'N/A')}")
-        output.print()
+    if fmt == "json":
+        click.echo(json.dumps(asdict(report), indent=2, default=str))
+    else:
+        _print_remediation(report)
 
 
 @cli.command(cls=ExamplesCommand, epilog=WATCH_EXAMPLES)
