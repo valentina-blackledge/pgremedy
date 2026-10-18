@@ -41,15 +41,23 @@ pgremedy watch --versions 16,17 --once
 
 # Watch continuously (polls every hour)
 pgremedy watch --versions 16,17
+
+# STIG V-283674 and CIS 1.5, recorded in a STIG Viewer checklist
+pgremedy compliance "postgresql://auditor@db01/postgres" -W --checklist db01.cklb
+
+# Offline: build a bundle on a connected machine, use it anywhere
+pgremedy bundle create pg-data.json
+pgremedy --data pg-data.json scan "service=prod"
 ```
 
-Every command except `watch` supports `--format json` for machine-readable output.
+Every command except `watch` and `bundle` supports `--format json` for machine-readable output.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
-| 0 | The check ran. Read the output for findings. |
+| 0 | The check ran. Read the output for findings. For `compliance`: every check passed. |
+| 1 | `compliance` only: at least one check failed or needs manual review. |
 | 2 | The check did **not** run: a data source was unreachable or rate limited, the CVE doesn't exist, the database refused the connection, or the command line was invalid. |
 
 pgremedy never reports a clean result for a check it couldn't complete. If NVD or postgresql.org can't be reached, `scan`, `audit` and `watch` stop with an error instead of saying "no CVEs found".
@@ -61,6 +69,23 @@ Without a key, NVD allows 5 requests per 30 seconds, so pgremedy waits 6 seconds
 ```bash
 export NVD_API_KEY=your-key
 ```
+
+## Offline use
+
+Networks without internet access (common in DoD environments) can't reach NVD or postgresql.org. Build a data bundle on a connected machine and carry it across:
+
+```bash
+pgremedy bundle create pg-data.json      # on the connected machine; prints the file's SHA-256
+pgremedy bundle info pg-data.json        # on the offline machine: compare the SHA-256, check the age
+pgremedy --data pg-data.json scan "service=prod"
+export PGREMEDY_DATA=pg-data.json        # or set it once for every command
+```
+
+The bundle is one JSON file with every PostgreSQL server CVE from NVD and postgresql.org's release list. By default it also includes Red Hat's records for those CVEs (one request each; skip with `--no-redhat`) and Crunchy's PGO release notes. With a bundle, pgremedy makes no network requests at all, and output names the bundle it used.
+
+- **Missing data fails closed:** a CVE that isn't in the bundle is an error, not "no record".
+- **Age warning:** a bundle older than 30 days triggers a warning, because PostgreSQL ships fixes at least quarterly. Refresh it regularly.
+- **Live-only commands:** `watch` and `audit-package` need live data and refuse to run from a bundle.
 
 ## Commands
 
@@ -97,6 +122,24 @@ Shows how to fix a CVE.
 - **Without it:** a table of every affected branch with its first fixed release, latest release and support status.
 - **Workarounds:** shown only when a vendor documents one (currently Red Hat's mitigation text). pgremedy doesn't guess workarounds from the CVE description. For most PostgreSQL CVEs, upgrading is the fix.
 - **Also shown:** a link to the PostgreSQL advisory, Red Hat patch status and Crunchy PGO release info. CVEs in other products (drivers, distro packages) are named as such, and CVEs NVD hasn't analyzed yet are flagged.
+
+### `compliance <CONNECTION-STRING>`
+Evaluates the two benchmark rules about running supported, patched PostgreSQL. Both are manual checks in their documents; pgremedy automates them and records the evidence.
+
+| Rule | pgremedy's verdict |
+|------|--------------------|
+| **DISA STIG V-283674** (CAT I, Crunchy Data Postgres 16 STIG): "PostgreSQL products must be a version supported by the vendor." | **Fail** if the branch is end-of-life or the server isn't on the latest minor release. That's the rule's own check text, so the verdict is based on the version only. |
+| **CIS 1.5** (numbering as in the CIS PostgreSQL 17 Benchmark v1.0.0): "Ensure the Latest Security Patches are Applied." | **Fail** for the same reasons, or if a fix that needs a manual step (CVE-2024-4317) isn't applied in every database. **Review** if a database couldn't be checked. |
+
+Each check reports pass, fail or review, with the reasons and the fix. `--format json` adds the full evidence:
+- what was checked, when, with which data (live, or the bundle and its SHA-256)
+- the installed version and the latest release
+- the CVEs that apply
+- the manual-fix status
+
+`--checklist FILE` records the STIG result in an existing STIG Viewer checklist (`.ckl` or `.cklb`). It sets that rule's status and finding details, keeps the assessor's comments, and saves the original as `FILE.bak`; nothing else in the file changes. It also recognizes the rule under its earlier ID, V-265871.
+
+pgremedy's verdict is evidence for an assessor, not the assessment itself. Rule numbers can change between STIG and benchmark releases, so check them against the release your organization uses.
 
 ### `watch --versions <MAJORS>`
 Monitors the given branches (`16,17`). The first run records a baseline of the CVEs already known for those branches without alerting. Later runs report:
