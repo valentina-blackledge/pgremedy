@@ -175,3 +175,4 @@ class ScanResult:
     assessment: list[dict] = field(default_factory=list)
     records_checked: int = 0
     manual_fixes: list[ManualFixCheck] = field(default_factory=list)
+    data_source: dict = field(default_factory=dict)

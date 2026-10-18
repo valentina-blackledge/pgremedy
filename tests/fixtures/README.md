@@ -16,6 +16,7 @@ reads. Each file in `nvd/` is the `cve` object NVD returns inside
 | `postgres/<branch>-vulnerable.<view>.sql` | `pg_get_viewdef()` output from real clusters created on 14.11, 15.6 and 16.2 (before the CVE-2024-4317 fix), then upgraded in place to 14.23, 15.18 and 16.15. Another user could read private statistics through these views. |
 | `postgres/<branch>-fixed.<view>.sql` | The same views from clusters created fresh on 14.23, 15.18 and 16.15. The same test showed nothing. |
 | `postgresql_org_versions.json` | Subset of https://www.postgresql.org/versions.json (9.6 and 12–18). |
+| `checklists/*.ckl`, `*.cklb` | Small STIG Viewer checklists written for these tests, in the structure STIG Viewer 2 (`.ckl`, XML) and 3 (`.cklb`, JSON) use (checked against STIG Manager's sample files). Rule V-283674 is the real version rule; V-000001 and V-999998 are made-up IDs (an unrelated rule, and the version rule under a changed ID). |
 | `redhat/CVE-2026-6471.json` | Red Hat record with a real workaround. Structure as served (`mitigation` is `{"value", "lang"}`); the text is a paraphrase of Red Hat's, not a copy. |
 | `redhat/CVE-2024-7348.json` | Red Hat record whose mitigation is Red Hat's "not available" boilerplate (the opening words are copied; the rest is cut). |
 

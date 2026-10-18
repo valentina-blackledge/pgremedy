@@ -12,7 +12,7 @@ from typing import Any, Iterator
 import requests
 from packaging.version import Version
 
-from pgremedy import __version__, pgversion
+from pgremedy import __version__, offline, pgversion
 from pgremedy.errors import SourceUnavailable, describe
 
 API_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -90,12 +90,20 @@ def _get(params: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_cve(cve_id: str) -> dict[str, Any] | None:
     """One CVE record, or None if NVD has no record with that ID."""
+    bundle = offline.active()
+    if bundle is not None:
+        return bundle.nvd_cve(cve_id)
     vulns = _get({"cveId": cve_id}).get("vulnerabilities") or []
     return vulns[0].get("cve") if vulns else None
 
 
 def fetch_product_cves(extra_params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """All PostgreSQL server CVEs (optionally filtered), following every page."""
+    bundle = offline.active()
+    if bundle is not None:
+        if extra_params:
+            raise SourceUnavailable(offline.SOURCE, "it can't filter CVEs by date")
+        return list(bundle.nvd_cves)
     params = {"virtualMatchString": PRODUCT_CPE, "resultsPerPage": PAGE_SIZE, **(extra_params or {})}
     cves: list[dict[str, Any]] = []
     total = 0
@@ -117,6 +125,7 @@ def _nvd_timestamp(moment: datetime) -> str:
 
 def fetch_product_cves_modified(since: datetime, until: datetime) -> list[dict[str, Any]]:
     """PostgreSQL server CVEs added or changed between two moments."""
+    offline.require_live("watch")
     seen: set[str] = set()
     cves: list[dict[str, Any]] = []
     window_start = since

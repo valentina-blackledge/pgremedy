@@ -1,0 +1,48 @@
+{
+  "title": "pgremedy sample checklist",
+  "id": "11111111-1111-1111-1111-111111111111",
+  "active": false,
+  "mode": 2,
+  "has_path": true,
+  "target_data": {
+    "target_type": "Computing",
+    "host_name": "vpn01",
+    "ip_address": "10.0.0.5",
+    "mac_address": "",
+    "fqdn": "",
+    "comments": "",
+    "role": "Member Server",
+    "is_web_database": true,
+    "technology_area": "",
+    "web_db_site": "db01",
+    "web_db_instance": "postgres"
+  },
+  "stigs": [
+    {
+      "stig_name": "Sample VPN STIG",
+      "display_name": "Sample VPN STIG",
+      "stig_id": "CD_Postgres_16",
+      "version": 1,
+      "release_info": "sample",
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "reference_identifier": "0000",
+      "size": 1,
+      "rules": [
+        {
+          "uuid": "00000000-0000-0000-0000-000000207184",
+          "group_id": "V-207184",
+          "rule_id": "SV-207184r1_rule",
+          "severity": "high",
+          "rule_title": "The VPN Gateway must use a security policy.",
+          "status": "not_reviewed",
+          "overrides": {},
+          "comments": "",
+          "finding_details": "",
+          "ccis": [
+            "CCI-003376"
+          ]
+        }
+      ]
+    }
+  ]
+}

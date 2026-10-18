@@ -6,11 +6,13 @@ import copy
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
+import psycopg
 import pytest
 import requests
 
-from pgremedy import branches
+from pgremedy import branches, offline, scanner
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -75,6 +77,9 @@ def isolated(monkeypatch):
     monkeypatch.setattr(nvd, "_sleep", lambda seconds: None)
     monkeypatch.setattr(nvd, "_last_request_at", None)
     monkeypatch.setattr(branches, "_today", lambda: TODAY)
+    monkeypatch.setattr(offline, "_active", None)
+    monkeypatch.setattr(offline, "_pause", lambda seconds: None)
+    monkeypatch.delenv("PGREMEDY_DATA", raising=False)
     monkeypatch.delenv("NVD_API_KEY", raising=False)
     monkeypatch.setenv("COLUMNS", "300")   # keep Rich from wrapping lines tests look for
 
@@ -139,3 +144,52 @@ class World:
 @pytest.fixture
 def world(http, nvd_records, versions_json) -> World:
     return World(http, nvd_records, versions_json)
+
+
+# ── fake PostgreSQL clusters (for scan and compliance) ──────────────────────
+
+def viewdefs(branch: str, state: str) -> tuple[str, str]:
+    return tuple((FIXTURES / "postgres" / f"{branch}-{state}.{view}.sql").read_text()
+                 for view in ("pg_stats_ext", "pg_stats_ext_exprs"))
+
+
+class FakeConnection:
+    def __init__(self, row=None, query_error=None):
+        self.row, self.query_error = row, query_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query):
+        assert query.lstrip().upper().startswith("SELECT"), "manual-fix checks must be read-only"
+        if self.query_error:
+            raise self.query_error
+        return SimpleNamespace(fetchone=lambda: self.row)
+
+
+@pytest.fixture
+def cluster(monkeypatch):
+    """A cluster whose databases each have vulnerable or fixed views (or refuse connections)."""
+    calls = []
+
+    def make(version, branch, databases, template0=True):
+        listed = [(name, True) for name in databases] + ([("template0", False)] if template0 else [])
+        info = scanner.ServerInfo(version, 0, [], "scanner@db.example.com:5432/postgres", sorted(listed))
+        monkeypatch.setattr(scanner, "read_server", lambda conninfo, password=None: info)
+
+        def connect(conninfo, **kwargs):
+            calls.append(kwargs)
+            state = databases[kwargs["dbname"]]
+            if isinstance(state, Exception) and state.args and state.args[0].startswith("query:"):
+                return FakeConnection(query_error=psycopg.Error(state.args[0].removeprefix("query:")))
+            if isinstance(state, Exception):
+                raise state
+            return FakeConnection(row=viewdefs(branch, state))
+
+        monkeypatch.setattr(psycopg, "connect", connect)
+        return calls
+
+    return make
