@@ -17,7 +17,7 @@ from typing import Any
 
 from rich.console import Console
 
-from pgremedy import branches, pgversion
+from pgremedy import branches, pgversion, postupgrade
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 from pgremedy.branches import BranchStatus
 from pgremedy.errors import SourceUnavailable
@@ -25,6 +25,7 @@ from pgremedy.models import (
     BranchFix,
     CrunchyInfo,
     Finding,
+    ManualStep,
     Mitigation,
     RemediationReport,
     VersionAdvice,
@@ -64,6 +65,14 @@ def generate_remediation(cve_id: str, pg_version: str | None = None) -> Remediat
         report.scope = "postgresql-server"
         report.advisory_url = ADVISORY_URL.format(cve_id=cve_id)
         report.branches = _branch_table(nvd_data, versions)
+        manual = postupgrade.find(cve_id)
+        if manual and (pg_version is None or pgversion.major_of(pg_version) in manual.fixed_in):
+            report.manual_step = ManualStep(
+                cve_id=manual.cve_id,
+                script=manual.script,
+                instructions=manual.instructions(),
+                advisory_url=manual.advisory_url,
+            )
     else:
         report.scope = "other-products"
         report.other_products = nvd.affected_products(nvd_data)
@@ -122,6 +131,9 @@ def _advise(nvd_data: dict, version: str, versions: list[dict[str, Any]], report
     advice.fixed_in = match.fixed_in or branch.fixed_in
     fix = advice.fixed_in
     current = pgversion.parse(version)
+    manual = postupgrade.find(report.cve_id)
+    if manual and status.major not in manual.fixed_in:
+        manual = None
 
     if match.affected:
         advice.affected = True
@@ -134,6 +146,19 @@ def _advise(nvd_data: dict, version: str, versions: list[dict[str, Any]], report
                 f"{version} is already the {_latest_word(status)} {status.major}.x release, and NVD still lists it "
                 "as affected. Check the advisory for a workaround or an upcoming fix."
             ))
+        if manual:
+            add("warning", (
+                f"After upgrading, also run {manual.script} in every database: the upgrade alone only fixes "
+                "clusters created afterward."
+            ))
+    elif manual and fix and current is not None and current >= pgversion.parse(fix):
+        # The release has the fix, but a cluster created before it doesn't.
+        add("warning", (
+            f"{version} includes the fix (first shipped in {fix}), but only clusters created on {fix} or later "
+            f"get it automatically. A cluster created earlier stays exposed until {manual.script} is run in every "
+            "database. `pgremedy scan` checks yours."
+        ))
+        _add_behind_note(advice, status)
     elif fix and current is not None and current >= pgversion.parse(fix):
         advice.affected = False
         add("ok", f"Not affected: {version} already includes the fix (first shipped in {fix}).")

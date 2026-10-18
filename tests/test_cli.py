@@ -42,7 +42,7 @@ def test_scan_reports_only_cves_that_affect_the_server(world, server):
     assert "CVE-2026-6471" in out and "16.15" in out
     for not_applicable in ("CVE-2024-10979", "CVE-2016-1255", "CVE-2014-0060", "CVE-2010-3781", "CVE-2024-1597"):
         assert not_applicable not in out
-    assert "checked 6 PostgreSQL CVE records" in out
+    assert "checked 7 PostgreSQL CVE records" in out
 
 
 def test_scan_of_the_latest_release(world, server):
@@ -51,7 +51,7 @@ def test_scan_of_the_latest_release(world, server):
     out = flat(result.output)
     assert result.exit_code == 0, out
     assert "16.15 is the latest 16.x release" in out
-    assert "NVD lists no medium+ severity CVEs affecting 16.15 (checked 6 PostgreSQL CVE records)" in out
+    assert "NVD lists no medium+ severity CVEs affecting 16.15 (checked 7 PostgreSQL CVE records)" in out
 
 
 def test_scan_never_calls_an_end_of_life_server_safe(world, server):
@@ -104,8 +104,8 @@ def test_audit_a_release_lists_only_what_affects_it(world):
 def test_audit_a_branch_lists_everything_that_affected_it(world):
     report = _audit_json("16")
     assert report["scope"] == "branch"
-    assert {r["cve_id"] for r in report["results"]} == {"CVE-2024-10979", "CVE-2026-6471"}
-    assert report["records_checked"] == 6
+    assert {r["cve_id"] for r in report["results"]} == {"CVE-2024-10979", "CVE-2026-6471", "CVE-2024-4317"}
+    assert report["records_checked"] == 7
 
 
 def test_audit_warns_about_end_of_life(world):

@@ -13,13 +13,15 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from pgremedy import branches, pgversion
+from pgremedy import branches, pgversion, postupgrade
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 from pgremedy.errors import ConnectionFailed, SourceUnavailable
+from pgremedy.scanner import NO_CONNECTIONS
 from pgremedy.models import (
     CVEReport,
     CVSSInfo,
     CrunchyInfo,
+    ManualFixCheck,
     RedHatInfo,
     RemediationReport,
 )
@@ -121,6 +123,49 @@ def _build_report(cve_id: str, forced_type: str | None = None) -> CVEReport | No
     return report
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _print_manual_fixes(checks: list[ManualFixCheck], pg_version: str) -> None:
+    """Fixes the upgrade alone doesn't apply: shown whenever they were checked, whatever --severity-min says."""
+    if not checks:
+        return
+    output.print("[bold]Fixes that need a manual step[/bold]")
+    for check in checks:
+        score = f", CVSS {check.cvss_score}" if check.cvss_score is not None else ""
+        output.print(f"  {check.cve_id} ({check.severity}{score}): {escape(check.summary)}")
+        checked = len(check.missing) + len(check.applied)
+        if check.missing:
+            output.print(
+                f"    [bold red]Not applied in {len(check.missing)} of {_plural(checked, 'database')} checked: "
+                f"{escape(', '.join(check.missing))}.[/bold red]"
+            )
+            if check.release_has_fix:
+                output.print(
+                    f"    {pg_version} includes the fix, but a cluster created before {check.fixed_in} keeps the "
+                    "vulnerable objects until the fix is applied in each database."
+                )
+            else:
+                output.print(
+                    f"    {pg_version} doesn't include the fix (first shipped in {check.fixed_in}). Upgrade first, "
+                    "then apply it: the upgrade alone only fixes clusters created afterward."
+                )
+            output.print(
+                f"    Run {check.script} as a superuser in every database, including template0 and template1 "
+                f"(template0 needs connections enabled temporarily). Steps: {check.advisory_url}"
+            )
+        elif check.applied:
+            output.print(f"    [green]Applied in all {_plural(checked, 'database')} checked.[/green]")
+        else:
+            output.print("    [yellow]No database could be checked, so this is unknown.[/yellow]")
+        for db in check.unchecked:
+            style = "dim" if db.reason == NO_CONNECTIONS else "yellow"
+            reason = (db.reason or "unknown reason").rstrip(".")
+            output.print(f"    [{style}]Not checked: {escape(db.database)} ({escape(reason)}).[/{style}]")
+    output.print()
+
+
 def _print_redhat(rh: RedHatInfo | None, error: str | None) -> None:
     output.print("[bold]Red Hat Status[/bold]")
     if error:
@@ -216,6 +261,17 @@ def _print_remediation(report: RemediationReport) -> None:
         output.print(f"PostgreSQL advisory: {report.advisory_url}")
         output.print()
 
+    if report.manual_step:
+        step = report.manual_step
+        output.print("[bold]Manual step after upgrading[/bold]")
+        output.print(
+            "  [yellow]Upgrading alone only fixes clusters created afterward. Existing clusters stay exposed "
+            "until the fix is applied in each database.[/yellow]"
+        )
+        output.print(f"  {escape(step.instructions)}")
+        output.print("  [dim]`pgremedy scan` checks whether it has been applied.[/dim]")
+        output.print()
+
     output.print("[bold]Workarounds[/bold]")
     if "redhat" in report.source_errors:
         output.print(
@@ -228,6 +284,8 @@ def _print_remediation(report: RemediationReport) -> None:
             for line in m.text.splitlines():
                 if line.strip():
                     output.print(f"    {escape(line.strip())}")
+    elif report.manual_step:
+        output.print("  None documented by Red Hat. The fix is the upgrade plus the manual step above.")
     else:
         output.print("  None documented by Red Hat. Upgrading is the fix.")
     output.print()
@@ -405,6 +463,11 @@ def audit(pg_version: str, severity: str | None, fmt: str):
 
     status = branches.branch_status(pg_version, postgresql_org.fetch_versions())
     assessment = branches.assess(status)
+    for fix in postupgrade.for_branch(major):
+        assessment.append(("warning", (
+            f"{fix.cve_id}: clusters created before {fix.fixed_in[major]} stay exposed after upgrading until "
+            f"{fix.script} is run in every database. `pgremedy scan` checks whether it has been."
+        )))
     cves = nvd.fetch_product_cves()
 
     severity_filter = [s.strip().upper() for s in severity.split(",")] if severity else None
@@ -544,6 +607,7 @@ def scan(conninfo: str, severity_min: str, fmt: str, password_prompt: bool):
     output.print()
     _print_assessment([(a["level"], a["message"]) for a in result.assessment])
     output.print()
+    _print_manual_fixes(result.manual_fixes, result.pg_version)
 
     if not result.cves:
         if result.branch is not None and result.branch.is_eol:
