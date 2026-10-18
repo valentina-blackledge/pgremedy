@@ -65,6 +65,8 @@ uv run --project <SKILL_DIR> python -m pgremedy scan "<CONNECTION-STRING>" [--se
 
 Connects to a live Postgres instance and reads its version. Checks that version against postgresql.org: is it the latest minor release, and is the branch end-of-life? Then lists the NVD CVEs that apply, with the fixing release.
 
+On 14, 15 and 16 it also checks every database for fixes that need a manual step (CVE-2024-4317). If the output has a "Fixes that need a manual step" section saying the fix is not applied, tell the user even when the version is current: the server is exposed until the listed script is run in each database. "Not checked" databases are unknown, not fixed.
+
 **Connection string formats:**
 - `postgresql://user@host:port/dbname`
 - `host=x port=5432 dbname=y user=z`
