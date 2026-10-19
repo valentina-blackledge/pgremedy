@@ -9,7 +9,7 @@ import requests
 from click.testing import CliRunner
 
 from pgremedy import offline, scanner
-from pgremedy.apis import nvd, postgresql_org, redhat
+from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 from pgremedy.cli import cli
 
 CONN = "postgresql://scanner@db.example.com/postgres"
@@ -53,9 +53,11 @@ def test_create_saves_every_source(bundle, world):
     assert {c["id"] for c in data["nvd_cves"]} == {c["id"] for c in world.product}
     assert data["postgresql_versions"] == world.versions
     assert data["redhat_cves"]["CVE-2026-6471"]["mitigation"]["lang"] == "en:us"
-    assert data["redhat_cves"]["CVE-2024-10979"] is None          # Red Hat has no record: kept as "no record"
-    assert data["crunchy_releases"] == []
-    assert data["sources"]["redhat"] == {"count": 1, "requested": 7}
+    assert len(data["redhat_cves"]["CVE-2024-10979"]["affected_release"]) == 30
+    assert data["redhat_cves"]["CVE-2014-0060"] is None          # Red Hat has no record: kept as "no record"
+    assert data["crunchy_releases"] == world.releases
+    assert data["sources"]["redhat"] == {"count": 2, "requested": 7}
+    assert data["sources"]["crunchy"] == {"count": 2}
 
 
 def test_create_prints_the_sha256(world, tmp_path):
@@ -73,7 +75,7 @@ def test_create_without_red_hat(world, tmp_path):
 
 
 @pytest.mark.parametrize("source, name", [(nvd.API_BASE, "NVD"), (postgresql_org.VERSIONS_URL, "postgresql.org"),
-                                          (redhat.CVE_API, "Red Hat")])
+                                          (redhat.CVE_API, "Red Hat"), (crunchy.RELEASES_API, crunchy.SOURCE)])
 def test_create_writes_nothing_when_a_source_fails(world, tmp_path, source, name):
     world.http.down(source)
     path = tmp_path / "b.json"
@@ -83,6 +85,8 @@ def test_create_writes_nothing_when_a_source_fails(world, tmp_path, source, name
     assert not path.exists() and list(tmp_path.iterdir()) == []
     if name == "Red Hat":
         assert "--no-redhat" in result.output
+    if name == crunchy.SOURCE:
+        assert "--no-crunchy" in result.output
 
 
 def test_create_ignores_a_bundle_set_in_the_environment(bundle, world, tmp_path):
@@ -94,7 +98,7 @@ def test_create_ignores_a_bundle_set_in_the_environment(bundle, world, tmp_path)
 
 def test_info(bundle):
     out = flat(run("bundle", "info", str(bundle)).output)
-    assert "NVD: 7 PostgreSQL CVEs" in out and "Red Hat: 1 records" in out
+    assert "NVD: 7 PostgreSQL CVEs" in out and "Red Hat: 2 records" in out and "Crunchy PGO: 2 releases" in out
     assert hashlib.sha256(bundle.read_bytes()).hexdigest() in out
 
 

@@ -92,3 +92,16 @@ def test_modified_windows_respect_the_120_day_limit(http):
         ("2026-10-02T00:00:00.000", "2026-10-12T00:00:00.000"),
     ]
     assert [c["id"] for c in cves] == ["CVE-2026-0001"]   # repeats across windows collapse
+
+
+def test_no_postgresql_cves_at_all_fails_closed(http):
+    # NVD has more than 200; none means the query broke, not that PostgreSQL is safe.
+    http.add(nvd.API_BASE, lambda url, params: nvd_page([]))
+    with pytest.raises(SourceUnavailable, match="returned no PostgreSQL CVEs at all"):
+        nvd.fetch_product_cves()
+
+
+def test_a_watch_window_with_no_changes_is_not_an_error(http):
+    http.add(nvd.API_BASE, lambda url, params: nvd_page([]))
+    until = datetime(2026, 10, 12, tzinfo=timezone.utc)
+    assert nvd.fetch_product_cves_modified(until - timedelta(days=1), until) == []

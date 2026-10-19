@@ -109,3 +109,88 @@ def test_version_parsing(text, major, minor, branch):
     assert pgversion.major_of(text) == major
     assert pgversion.minor_of(text) == minor
     assert pgversion.is_branch(text) == branch
+
+
+# ── describing affected versions ─────────────────────────────────────────────
+
+SERVER = "cpe:2.3:a:postgresql:postgresql:*:*:*:*:*:*:*:*"
+
+
+def record(*matches):
+    return {"configurations": [{"nodes": [{"cpeMatch": [dict(vulnerable=True, **m) for m in matches]}]}]}
+
+
+def test_affected_releases_name_the_last_affected_one_not_the_fix(nvd_records):
+    cve = nvd_records["CVE-2024-10979"]
+    assert nvd.extract_affected_versions(cve) == [
+        "12.0 to 12.20", "13.0 to 13.16", "14.0 to 14.13", "15.0 to 15.8", "16.0 to 16.4", "17.0"]
+    assert nvd.fixes_by_branch(cve) == {"12": "12.21", "13": "13.17", "14": "14.14", "15": "15.9",
+                                        "16": "16.5", "17": "17.1"}
+
+
+@pytest.mark.parametrize("match, text", [
+    ({"versionEndExcluding": "9.4.26"}, "9.4.25 and earlier"),
+    ({"versionEndIncluding": "8.4.19"}, "8.4.19 and earlier"),
+    ({"versionStartIncluding": "16.0", "versionEndIncluding": "16.4"}, "16.0 to 16.4"),
+    ({"versionStartIncluding": "16.2", "versionEndIncluding": "16.2"}, "16.2"),
+    ({"versionStartIncluding": "16.0", "versionEndExcluding": "17.0"}, ">=16.0 <17.0"),   # no "16.x" to name
+    ({"versionStartExcluding": "15.1", "versionEndExcluding": "15.4"}, ">15.1 <15.4"),
+    ({"versionStartIncluding": "18.0"}, "18.0 and later"),
+    ({"versionStartIncluding": "9.6.0", "versionEndExcluding": "9.6.24"}, "9.6.0 to 9.6.23"),
+])
+def test_server_range_descriptions(match, text):
+    assert nvd.extract_affected_versions(record(dict(criteria=SERVER, **match))) == [text]
+
+
+def test_every_version_and_exact_versions():
+    assert nvd.extract_affected_versions(record({"criteria": SERVER})) == ["every version"]
+    exact = [{"criteria": f"cpe:2.3:a:postgresql:postgresql:9.0.{i}:*:*:*:*:*:*:*"} for i in (1, 2, 3, 5)]
+    beta = {"criteria": "cpe:2.3:a:postgresql:postgresql:9.6:beta1:*:*:*:*:*:*"}
+    # Consecutive releases are joined; the gap at 9.0.4 is kept.
+    assert nvd.extract_affected_versions(record(*exact, beta)) == ["9.0.1 to 9.0.3", "9.0.5", "9.6beta1"]
+    # Exact versions inside a listed range add nothing.
+    assert nvd.extract_affected_versions(record(*exact, {"criteria": SERVER, "versionEndExcluding": "9.0.6"})) == [
+        "9.0.5 and earlier"]
+
+
+def test_other_products_keep_exclusive_ends_as_written(nvd_records):
+    # pgjdbc's numbering can skip, so the release before 42.3.9 isn't named.
+    versions = nvd.product_versions(nvd_records["CVE-2024-1597"])
+    assert versions["postgresql_jdbc_driver (postgresql)"][:2] == ["<42.2.28", ">=42.3.0 <42.3.9"]
+    assert versions["fedora (fedoraproject)"] == ["40"]
+    assert nvd.extract_affected_versions(nvd_records["CVE-2024-1597"]) == []
+    # Numbered like an old PostgreSQL release, but 1.4.2 may never have shipped.
+    widget = record({"criteria": "cpe:2.3:a:example:widget:*:*:*:*:*:*:*:*",
+                     "versionStartIncluding": "1.4.0", "versionEndExcluding": "1.4.3"})
+    assert nvd.product_versions(widget) == {"widget (example)": [">=1.4.0 <1.4.3"]}
+
+
+def test_platform_entries_are_not_affected_products(nvd_records):
+    # PL/php lists PostgreSQL as vulnerable=false: the platform it runs on.
+    assert nvd.product_versions(nvd_records["CVE-2010-3781"]) == {"pl/php (alvaro_herrera)": ["1.4 and earlier"]}
+
+
+@pytest.mark.parametrize("cve_id, expected", [
+    ("CVE-2024-10979", "postgresql"),
+    ("CVE-2014-0060", "postgresql"),
+    ("CVE-2024-1597", "base-image"),     # pgjdbc: "postgresql" vendor, but not the server
+    ("CVE-2016-1255", "base-image"),     # Debian's postgresql-common
+    ("CVE-2010-3781", "base-image"),     # PL/php, PostgreSQL only as the platform
+])
+def test_type_follows_the_vulnerable_products(nvd_records, cve_id, expected):
+    assert nvd.detect_type(nvd_records[cve_id]) == expected
+
+
+def test_go_cpe_is_golang():
+    assert nvd.detect_type(record({"criteria": "cpe:2.3:a:golang:go:*:*:*:*:*:*:*:*",
+                                   "versionEndExcluding": "1.21.5"})) == "golang"
+
+
+@pytest.mark.parametrize("description, expected", [
+    ("A flaw introduced years ago in libfoo lets a user go around the check.", "base-image"),
+    ("In Go before 1.21.5, a crafted request can exhaust memory.", "golang"),
+    ("The ParseAddress function in net/mail can loop forever.", "golang"),
+    ("Missing authorization in PostgreSQL logical decoding.", "postgresql"),
+])
+def test_type_of_a_cve_nvd_has_not_analyzed_comes_from_the_description(description, expected):
+    assert nvd.detect_type({"descriptions": [{"lang": "en", "value": description}]}) == expected

@@ -60,7 +60,7 @@ Every command except `watch` and `bundle` supports `--format json` for machine-r
 | 1 | `compliance` only: at least one check failed or needs manual review. |
 | 2 | The check did **not** run: a data source was unreachable or rate limited, the CVE doesn't exist, the database refused the connection, or the command line was invalid. |
 
-pgremedy never reports a clean result for a check it couldn't complete. If NVD or postgresql.org can't be reached, `scan`, `audit` and `watch` stop with an error instead of saying "no CVEs found".
+pgremedy never reports a clean result for a check it couldn't complete. If NVD or postgresql.org can't be reached, or NVD returns no PostgreSQL CVEs at all, `scan`, `audit` and `watch` stop with an error instead of saying "no CVEs found". A `--severity` value that isn't on the scale is an error too, rather than a filter that matches nothing.
 
 ## NVD API key
 
@@ -69,6 +69,8 @@ Without a key, NVD allows 5 requests per 30 seconds, so pgremedy waits 6 seconds
 ```bash
 export NVD_API_KEY=your-key
 ```
+
+Crunchy's PGO release notes come from GitHub's API, which allows 60 requests an hour without a token. `lookup` and `remedy` read every page of releases (one or two requests each), so if you run many lookups, set `GITHUB_TOKEN` (or `GH_TOKEN`) to a GitHub token. pgremedy sends it only to api.github.com.
 
 ## Offline use
 
@@ -90,13 +92,21 @@ The bundle is one JSON file with every PostgreSQL server CVE from NVD and postgr
 ## Commands
 
 ### `lookup <CVE-ID>`
-Full CVE details from NVD, Red Hat, and Crunchy Data. Auto-detects whether the CVE affects PostgreSQL, Go, or a base image package. Use `--type` to override detection.
+Full CVE details from NVD, Red Hat, and Crunchy Data.
+
+- **PostgreSQL server CVEs:** the affected releases in each branch (`16.0 to 16.4`), the first fixed release in each (`16.5`), and a link to the PostgreSQL advisory.
+- **Other products:** a CVE in a driver, an add-on or a distro package (pgjdbc, PL/php, Debian's postgresql-common) is named as such, with that product's versions, even when "postgresql" is in its name.
+- **Not analyzed yet:** a new CVE whose products NVD hasn't recorded is flagged as such, not guessed.
+- **Red Hat:** every fixed package, with its RHEL product and advisory, plus the state of each product without a fix (such as "Out of support scope").
+- **Crunchy:** the PGO release whose notes mention the CVE, or how many release notes were searched.
+
+`--type` overrides the detected category (`cve_type` in JSON: `postgresql`, `golang` or `base-image`). The products and versions shown always come from NVD's data.
 
 ### `audit <PG-VERSION>`
-With a release (`16.2`), lists the CVEs that affect that exact release. With a branch (`16`, or `9.6` for pre-10 versions), lists every CVE that affected any release in it. Each result shows the release in that branch that fixes it, sorted by CVSS score. The output starts with the branch's status from postgresql.org: latest minor release, and whether it is end-of-life or close to it. Use `--severity critical,high` to filter.
+With a release (`16.2`), lists the CVEs that affect that exact release. With a branch (`16`, or `9.6` for pre-10 versions), lists every CVE that affected any release in it. Each result shows the release in that branch that fixes it, sorted by CVSS score. The output starts with the branch's status from postgresql.org: latest minor release, and whether it is end-of-life or close to it. Use `--severity critical,high` to filter, on NVD's scale (critical, high, medium, low). Any other value is an error, so a typo can't produce an empty, clean-looking result.
 
 ### `audit-package <PACKAGE>`
-Searches Red Hat Security API for recent CVEs on a RHEL package. Useful for checking Go, OpenSSL, glibc, and other dependencies in container images.
+Searches Red Hat Security API for recent CVEs on a RHEL package, reading every page of results. Useful for checking Go, OpenSSL, glibc, and other dependencies in container images. `--severity` uses Red Hat's scale (critical, important, moderate, low); anything else is an error.
 
 ### `scan <CONNECTION-STRING>`
 Connects to a live PostgreSQL instance and reads its exact version (and lists installed extensions). It then:
@@ -155,9 +165,9 @@ State lives in `~/.pgremedy/watch.json`. A failed check leaves the state untouch
 - [postgresql.org versions.json](https://www.postgresql.org/versions.json) -- latest minor release and end-of-life date per branch
 - [NVD (National Vulnerability Database)](https://nvd.nist.gov/) -- CVSS scores, affected versions, CPE data. pgremedy queries by product (`cpe:2.3:a:postgresql:postgresql`) and reads every page of results.
 - [Red Hat Security API](https://access.redhat.com/hydra/rest/securitydata/) -- RHEL patch status and advisories
-- [Crunchy Data PGO Releases](https://github.com/CrunchyData/postgres-operator/releases) -- container image advisory info
+- [Crunchy Data PGO Releases](https://github.com/CrunchyData/postgres-operator/releases) -- the release notes of every PGO release, searched for the CVE ID
 
-No local CVE database -- all data is fetched live from these APIs on every run.
+pgremedy keeps no CVE database of its own. Every run fetches the data live from these sources, unless you point it at an [offline bundle](#offline-use).
 
 ## Development
 

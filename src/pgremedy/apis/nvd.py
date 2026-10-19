@@ -116,6 +116,10 @@ def fetch_product_cves(extra_params: dict[str, Any] | None = None) -> list[dict[
             break
     if len(cves) < total:
         raise SourceUnavailable("NVD", f"returned {len(cves)} of {total} results")
+    if not cves and not extra_params:
+        # NVD lists more than 200 PostgreSQL CVEs. None at all means the query
+        # broke (an API change, a renamed product), not that PostgreSQL is safe.
+        raise SourceUnavailable("NVD", "returned no PostgreSQL CVEs at all (there should be more than 200)")
     return cves
 
 
@@ -166,47 +170,33 @@ def extract_cvss(cve_data: dict) -> dict[str, Any]:
     return {"score": None, "severity": "UNKNOWN", "vector": "UNKNOWN", "version": None}
 
 
+GO_VENDORS = {"golang"}    # the Go toolchain and standard library, and golang.org/x modules
+_POSTGRESQL_WORD = re.compile(r"\bpostgresql\b", re.IGNORECASE)
+_GO_WORDS = re.compile(r"\bgolang\b|\b(?:net|crypto)/[a-z]", re.IGNORECASE)
+_GO_RELEASE = re.compile(r"\bGo (?:before|through|prior to|versions?\b|\d)")   # "Go before 1.21.5"
+
+
 def detect_type(cve_data: dict | None) -> str:
+    """postgresql (the server), golang, or base-image (any other product).
+
+    Decided by the products NVD marks vulnerable. Only while NVD hasn't recorded
+    any (a new CVE) does the description decide.
+    """
     if not cve_data:
         return "unknown"
-    for config in cve_data.get("configurations", []):
-        for node in config.get("nodes", []):
-            for match in node.get("cpeMatch", []):
-                cpe = match.get("criteria", "").lower()
-                if "postgresql" in cpe:
-                    return "postgresql"
-                if "golang" in cpe or "go_project" in cpe:
-                    return "golang"
-    desc = english_description(cve_data).lower()
-    if "postgresql" in desc:
+    vulnerable = [fields for _, fields in _vulnerable_cpe_matches(cve_data)]
+    if any(_is_postgresql_server(fields) for fields in vulnerable):
         return "postgresql"
-    if any(tok in desc for tok in ("go ", "golang", "net/", "crypto/")):
+    if any(len(fields) > 3 and fields[3] in GO_VENDORS for fields in vulnerable):
+        return "golang"
+    if vulnerable:
+        return "base-image"
+    desc = english_description(cve_data)
+    if _POSTGRESQL_WORD.search(desc):
+        return "postgresql"
+    if _GO_WORDS.search(desc) or _GO_RELEASE.search(desc):
         return "golang"
     return "base-image"
-
-
-def extract_affected_versions(cve_data: dict, cve_type: str = "postgresql") -> list[str]:
-    affected: list[str] = []
-    for config in cve_data.get("configurations", []):
-        for node in config.get("nodes", []):
-            for match in node.get("cpeMatch", []):
-                cpe = match.get("criteria", "").lower()
-                hit = (
-                    (cve_type == "postgresql" and "postgresql" in cpe)
-                    or (cve_type == "golang" and ("golang" in cpe or "go_project" in cpe))
-                    or cve_type == "base-image"
-                )
-                if not hit:
-                    continue
-                vs = match.get("versionStartIncluding", "")
-                ve = match.get("versionEndExcluding", match.get("versionEndIncluding", ""))
-                if vs or ve:
-                    affected.append(f"{vs} - {ve}".strip(" -"))
-                else:
-                    parts = match.get("criteria", "").split(":")
-                    if len(parts) > 5 and parts[5] != "*":
-                        affected.append(parts[5])
-    return affected or ["Check NVD/vendor advisory for version details"]
 
 
 # ── Version matching ─────────────────────────────────────────────────────────
@@ -301,17 +291,138 @@ def lists_postgresql_server(cve_data: dict) -> bool:
     return any(_is_postgresql_server(fields) for _, fields in _vulnerable_cpe_matches(cve_data))
 
 
+SERVER_LABEL = "PostgreSQL server"
+
+
+def product_label(fields: list[str]) -> str:
+    """ "PostgreSQL server", or "product (vendor)" such as "postgresql_jdbc_driver (postgresql)"."""
+    if _is_postgresql_server(fields):
+        return SERVER_LABEL
+    vendor, product = (field.replace("\\", "") for field in fields[3:5])   # CPEs escape e.g. "pl\/php"
+    return f"{product} ({vendor})"
+
+
 def affected_products(cve_data: dict) -> list[str]:
-    """Vulnerable products as "product (vendor)", e.g. "postgresql_jdbc_driver (postgresql)"."""
+    """Vulnerable products, labelled as product_label() does, in NVD's order."""
     names: list[str] = []
     for _, fields in _vulnerable_cpe_matches(cve_data):
         if len(fields) < 5:
             continue
-        vendor, product = (field.replace("\\", "") for field in fields[3:5])   # CPEs escape e.g. "pl\/php"
-        name = f"{product} ({vendor})"
+        name = product_label(fields)
         if name not in names:
             names.append(name)
     return names
+
+
+# ── Describing affected versions ─────────────────────────────────────────────
+
+def _cpe_version(fields: list[str]) -> str:
+    """The version written in a CPE itself, with its update: "8.4.1", "1.3.5beta1"."""
+    version = fields[5].replace("\\", "") if len(fields) > 5 else "*"
+    update = fields[6].replace("\\", "") if len(fields) > 6 else "*"
+    return version + (update if update not in ("*", "-", "") else "")
+
+
+def _release_before(text: str) -> str | None:
+    """The PostgreSQL release just before this one: 16.4 for 16.5, 9.6.23 for 9.6.24.
+
+    Minor releases are numbered consecutively, so this is exact. None for x.0
+    releases and anything that isn't a plain release number.
+    """
+    v = pgversion.parse(text)
+    if v is None or v.pre is not None or v.dev is not None or v.post is not None or v.local:
+        return None
+    rel = v.release
+    if len(rel) != (2 if rel[0] >= 10 else 3) or rel[-1] == 0:
+        return None
+    return ".".join(str(n) for n in (*rel[:-1], rel[-1] - 1))
+
+
+def _range_text(match: dict[str, Any], fields: list[str], server: bool) -> str:
+    """One cpeMatch entry in words: "16.0 to 16.4", "9.4.25 and earlier", ">=42.3.0 <42.3.9".
+
+    NVD's end versions are usually exclusive (the first fixed release). For the
+    PostgreSQL server the last affected release can be named; for other
+    products, whose numbering may skip, an exclusive end is shown as "<".
+    """
+    start_inc, start_exc = match.get("versionStartIncluding"), match.get("versionStartExcluding")
+    end_exc, end_inc = match.get("versionEndExcluding"), match.get("versionEndIncluding")
+    if not (start_inc or start_exc or end_exc or end_inc):
+        exact = _cpe_version(fields)
+        return "every version" if exact == "*" else exact
+
+    last = end_inc or (_release_before(end_exc) if server and end_exc else None)
+    if last and not start_exc:
+        if not start_inc:
+            return f"{last} and earlier"
+        first, final = pgversion.parse(start_inc), pgversion.parse(last)
+        if first is not None and final is not None and first <= final:
+            return start_inc if first == final else f"{start_inc} to {last}"
+    if not (end_exc or end_inc):
+        return f"{start_inc} and later" if start_inc else f"after {start_exc}"
+    lower = f">={start_inc}" if start_inc else (f">{start_exc}" if start_exc else "")
+    upper = f"<{end_exc}" if end_exc else f"<={end_inc}"
+    return f"{lower} {upper}".strip()
+
+
+def _follows(previous: Version, version: Version) -> bool:
+    before = _release_before(str(version))
+    return before is not None and Version(before) == previous
+
+
+def _describe(entries: list[tuple[_Range, dict[str, Any], list[str]]], server: bool) -> list[str]:
+    """Readable affected versions for one product, lowest first.
+
+    Exact versions that a listed range already covers are dropped, and for the
+    server, runs of consecutive releases are joined: 8.4.1 ... 8.4.5 becomes
+    "8.4.1 to 8.4.5".
+    """
+    exact: dict[Version, str] = {}
+    spans: list[tuple[_Range, dict[str, Any], list[str]]] = []
+    for rng, match, fields in entries:
+        if rng.start is not None and rng.start == rng.end and rng.start_inclusive and rng.end_inclusive:
+            exact.setdefault(rng.start, _range_text(match, fields, server))
+        else:
+            spans.append((rng, match, fields))
+    exact = {v: text for v, text in exact.items() if not any(r.contains(v) for r, _, _ in spans)}
+
+    lowest = Version("0")
+    items: list[tuple[Version, str]] = [(rng.start or lowest, _range_text(match, fields, server))
+                                        for rng, match, fields in spans]
+    run: list[tuple[Version, str]] = []
+    for v, text in sorted(exact.items()):
+        if run and server and _follows(run[-1][0], v):
+            run.append((v, text))
+            continue
+        if run:
+            items.append((run[0][0], run[0][1] if len(run) == 1 else f"{run[0][1]} to {run[-1][1]}"))
+        run = [(v, text)]
+    if run:
+        items.append((run[0][0], run[0][1] if len(run) == 1 else f"{run[0][1]} to {run[-1][1]}"))
+
+    described: list[str] = []
+    for _, text in sorted(items, key=lambda item: item[0]):
+        if text not in described:
+            described.append(text)
+    return described
+
+
+def product_versions(cve_data: dict) -> dict[str, list[str]]:
+    """Affected versions of every product NVD marks vulnerable, by product_label()."""
+    groups: dict[str, list[tuple[_Range, dict[str, Any], list[str]]]] = {}
+    for match, fields in _vulnerable_cpe_matches(cve_data):
+        if len(fields) < 6:
+            continue
+        entries = groups.setdefault(product_label(fields), [])
+        rng = _range_of(match, fields)
+        if rng is not None:
+            entries.append((rng, match, fields))
+    return {label: _describe(entries, server=label == SERVER_LABEL) for label, entries in groups.items()}
+
+
+def extract_affected_versions(cve_data: dict) -> list[str]:
+    """Affected PostgreSQL server releases in words: ["16.0 to 16.4", "17.0"]."""
+    return product_versions(cve_data).get(SERVER_LABEL, [])
 
 
 @dataclass(frozen=True)

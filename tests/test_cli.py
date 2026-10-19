@@ -120,13 +120,43 @@ def test_audit_fails_closed(world):
     assert "Found 0" not in result.output
 
 
+@pytest.mark.parametrize("value, message", [
+    ("important", "'important' is on Red Hat's scale; the nearest NVD severity is 'high'"),
+    ("crit", "'crit' isn't one of NVD's severities (critical, high, medium, low)"),
+    (",", "give at least one of critical, high, medium, low"),
+])
+def test_audit_rejects_severities_nvd_does_not_use(world, value, message):
+    # An unknown value would match nothing and look like a clean result.
+    result = run("audit", "16.2", "--severity", value)
+    assert result.exit_code == 2
+    assert message in flat(result.output)
+    assert "Found 0" not in result.output
+    assert world.http.calls == []
+
+
+def test_audit_severity_filter_ignores_case_and_spaces(world):
+    report = _audit_json("16.2", "--severity", "HIGH, Critical")
+    assert {r["cve_id"] for r in report["results"]} == {"CVE-2024-10979", "CVE-2026-6471"}
+
+
+@pytest.mark.parametrize("command", [["audit", "16.2"], ["scan", "postgresql://scanner@db/postgres"]])
+def test_no_postgresql_cves_from_nvd_is_an_error_not_a_clean_result(world, server, command):
+    server("16.14")
+    world.product = []
+    result = run(*command)
+    out = flat(result.output)
+    assert result.exit_code == 2
+    assert "couldn't get data from NVD (returned no PostgreSQL CVEs at all" in out
+    assert "lists no" not in out and "Found 0" not in out
+
+
 # ── lookup / remedy ──────────────────────────────────────────────────────────
 
 def test_lookup_marks_secondary_sources_as_unavailable(world):
     world.http.down(redhat.CVE_API)
     result = run("lookup", "CVE-2024-10979")
     assert result.exit_code == 0, result.output
-    assert "Unavailable: couldn't reach Red Hat" in flat(result.output)
+    assert "Unavailable: couldn't get data from Red Hat" in flat(result.output)
 
     report = json.loads(run("lookup", "CVE-2024-10979", "--format", "json").stdout)
     assert "redhat" in report["source_errors"]
