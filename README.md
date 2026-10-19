@@ -78,6 +78,9 @@ Connects to a live PostgreSQL instance and reads its exact version (and lists in
 
 1. Checks the version against postgresql.org's release list. Is it the latest minor release, how many releases behind is it, and is the branch end-of-life? Minor releases are cumulative, so this is the most reliable exposure check. It's also the only one that works for end-of-life branches, because NVD has no affected-version data for them.
 2. Matches the version against every PostgreSQL server CVE in NVD and lists the ones that apply, with the fixing release.
+3. Checks for fixes that need a manual step. A few security fixes change objects that `initdb` creates, so upgrading only fixes clusters created afterward. A cluster created earlier stays exposed on the latest release, and every version check calls it patched. For [CVE-2024-4317](https://www.postgresql.org/support/security/CVE-2024-4317/) (on 14, 15 and 16), scan reads the two affected view definitions in every database it can connect to. It then reports where `fix-CVE-2024-4317.sql` still needs to run.
+
+   This check is read-only (one connection and one `SELECT` per database) and works as an ordinary login. Databases it can't connect to, such as `template0`, are listed as not checked, never as fixed. The section is shown whatever `--severity-min` says.
 
 Accepts any libpq connection string:
 - `postgresql://user@host:5432/dbname`
@@ -90,6 +93,7 @@ Keep the password out of the connection string, because it ends up in your shell
 Shows how to fix a CVE.
 
 - **With `--pg-version 16.2`:** tells you whether that release is affected, when the fix first shipped (16.5), and what to upgrade to. That's always the latest release of your branch (16.15), because minor releases are cumulative. End-of-life branches are flagged: they get no fixes, and NVD doesn't list them, so "not listed" doesn't mean safe.
+- **Manual steps:** for fixes the upgrade alone doesn't apply to existing clusters (CVE-2024-4317), remedy shows the extra step. It never calls a release safe just because it includes the fix. `audit` mentions the step for the affected branches too.
 - **Without it:** a table of every affected branch with its first fixed release, latest release and support status.
 - **Workarounds:** shown only when a vendor documents one (currently Red Hat's mitigation text). pgremedy doesn't guess workarounds from the CVE description. For most PostgreSQL CVEs, upgrading is the fix.
 - **Also shown:** a link to the PostgreSQL advisory, Red Hat patch status and Crunchy PGO release info. CVEs in other products (drivers, distro packages) are named as such, and CVEs NVD hasn't analyzed yet are flagged.

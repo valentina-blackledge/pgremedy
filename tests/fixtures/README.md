@@ -12,6 +12,9 @@ reads. Each file in `nvd/` is the `cve` object NVD returns inside
 | `nvd/CVE-2016-1255.json` | Debian `postgresql-common` packaging bug. The CPE contains "postgresql" but it is not the server product. Abridged: the real record has 339 CPE entries across 7 configurations. |
 | `nvd/CVE-2010-3781.json` | PL/php add-on that lists PostgreSQL only as a non-vulnerable platform (`vulnerable: false`). |
 | `nvd/CVE-2024-1597.json` | pgjdbc (JDBC driver) CVE, CRITICAL. Vendor is `postgresql` but the product is `postgresql_jdbc_driver`, and its first range has no start ("< 42.2.28"), so a loose match would flag every server version. NVD's product query doesn't return it; the local product check is the backstop. |
+| `nvd/CVE-2024-4317.json` | The CVE whose fix needs a manual step. Built from the PostgreSQL advisory (fixed in 14.12, 15.7 and 16.3; CVSS 3.1) because NVD's record couldn't be fetched when this was written. The ranges follow NVD's usual layout for PostgreSQL CVEs. |
+| `postgres/<branch>-vulnerable.<view>.sql` | `pg_get_viewdef()` output from real clusters created on 14.11, 15.6 and 16.2 (before the CVE-2024-4317 fix), then upgraded in place to 14.23, 15.18 and 16.15. Another user could read private statistics through these views. |
+| `postgres/<branch>-fixed.<view>.sql` | The same views from clusters created fresh on 14.23, 15.18 and 16.15. The same test showed nothing. |
 | `postgresql_org_versions.json` | Subset of https://www.postgresql.org/versions.json (9.6 and 12–18). |
 | `redhat/CVE-2026-6471.json` | Red Hat record with a real workaround. Structure as served (`mitigation` is `{"value", "lang"}`); the text is a paraphrase of Red Hat's, not a copy. |
 | `redhat/CVE-2024-7348.json` | Red Hat record whose mitigation is Red Hat's "not available" boilerplate (the opening words are copied; the rest is cut). |

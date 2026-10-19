@@ -97,6 +97,52 @@ class Mitigation:
 
 
 @dataclass
+class ManualStep:
+    """A fix the upgrade alone doesn't apply to existing clusters."""
+    cve_id: str
+    script: str
+    instructions: str
+    advisory_url: str
+
+
+@dataclass
+class DatabaseCheck:
+    database: str
+    status: str                    # "applied", "not applied" or "not checked"
+    reason: str | None = None      # why it wasn't checked
+
+
+@dataclass
+class ManualFixCheck:
+    """Whether a manual fix has been applied in each database of a cluster."""
+    cve_id: str
+    summary: str
+    fixed_in: str                  # for this server's branch
+    script: str
+    advisory_url: str
+    severity: str = "UNKNOWN"
+    cvss_score: float | None = None
+    release_has_fix: bool = True   # the running release includes the fix (it still needs the script)
+    databases: list[DatabaseCheck] = field(default_factory=list)
+    # True: not applied in at least one database. False: applied in every
+    # database that accepts connections. None: unknown, because a database that
+    # accepts connections couldn't be checked (or none could).
+    exposed: bool | None = None
+
+    @property
+    def missing(self) -> list[str]:
+        return [d.database for d in self.databases if d.status == "not applied"]
+
+    @property
+    def applied(self) -> list[str]:
+        return [d.database for d in self.databases if d.status == "applied"]
+
+    @property
+    def unchecked(self) -> list[DatabaseCheck]:
+        return [d for d in self.databases if d.status == "not checked"]
+
+
+@dataclass
 class RemediationReport:
     cve_id: str
     description: str = ""
@@ -112,6 +158,7 @@ class RemediationReport:
     branches: list[BranchFix] = field(default_factory=list)
     advice: VersionAdvice | None = None
     mitigations: list[Mitigation] = field(default_factory=list)
+    manual_step: ManualStep | None = None
     redhat: RedHatInfo | None = None
     crunchy: CrunchyInfo | None = None
     source_errors: dict[str, str] = field(default_factory=dict)
@@ -127,3 +174,4 @@ class ScanResult:
     branch: BranchStatus | None = None
     assessment: list[dict] = field(default_factory=list)
     records_checked: int = 0
+    manual_fixes: list[ManualFixCheck] = field(default_factory=list)
