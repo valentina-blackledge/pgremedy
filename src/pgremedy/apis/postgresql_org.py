@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from pgremedy import __version__
+from pgremedy import __version__, offline
 from pgremedy.errors import SourceUnavailable, describe
 
 VERSIONS_URL = "https://www.postgresql.org/versions.json"
@@ -14,6 +14,9 @@ VERSIONS_URL = "https://www.postgresql.org/versions.json"
 
 def fetch_versions() -> list[dict[str, Any]]:
     """One entry per major version: major, latestMinor, supported, eolDate, ..."""
+    bundle = offline.active()
+    if bundle is not None:
+        return bundle.postgresql_versions
     try:
         resp = requests.get(VERSIONS_URL, headers={"User-Agent": f"pgremedy/{__version__}"}, timeout=30)
     except requests.RequestException as exc:

@@ -98,6 +98,29 @@ The first run records a baseline without alerting. Later runs report new CVEs fo
 
 **When:** User wants ongoing monitoring. Suitable for cron jobs.
 
+### compliance — STIG V-283674 and CIS 1.5
+
+```bash
+uv run --project <SKILL_DIR> python -m pgremedy compliance "<CONNECTION-STRING>" [--checklist FILE.cklb] [--format table|json]
+```
+
+Pass/fail/review for the DISA STIG version rule (V-283674, CAT I) and CIS 1.5 (latest security patches), with evidence. `--checklist` records the STIG result in an existing STIG Viewer checklist (.ckl or .cklb); the original is kept as FILE.bak. Exit code 0 = all passed, 1 = a check failed or needs review, 2 = couldn't run.
+
+Present the verdicts as evidence for an assessor, not as the assessment. The STIG rule is judged on version only; CIS 1.5 also fails when a manual fix (CVE-2024-4317) is missing.
+
+**When:** User mentions STIG, CIS benchmark, compliance, audit evidence, or STIG Viewer checklists.
+
+### Offline bundles
+
+```bash
+uv run --project <SKILL_DIR> python -m pgremedy bundle create pg-data.json      # needs internet
+uv run --project <SKILL_DIR> python -m pgremedy --data pg-data.json <command> ...  # no network at all
+```
+
+For networks without internet access. With `--data` (or PGREMEDY_DATA), every command except watch and audit-package runs from the file. Mention the bundle's age from the output; warn if it's over 30 days old.
+
+**When:** The target network can't reach NVD or postgresql.org (air-gapped, DoD), or the user asks for offline use.
+
 ## Workflow
 
 ### Step 1: Determine Intent
@@ -110,6 +133,8 @@ The first run records a baseline without alerting. Later runs report new CVEs fo
 | Live instance check | `scan <CONNINFO>` |
 | How to fix a CVE | `remedy <CVE-ID>` |
 | Ongoing monitoring | `watch --versions X,Y` |
+| STIG / CIS evidence | `compliance <CONNINFO>` |
+| No internet on the target network | `bundle create`, then `--data FILE` |
 
 ### Step 2: Run the Command
 

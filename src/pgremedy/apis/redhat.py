@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-from pgremedy import __version__
+from pgremedy import __version__, offline
 from pgremedy.errors import SourceUnavailable, describe
 from pgremedy.models import RedHatInfo, RedHatPackageState, RedHatPatch
 
@@ -33,6 +33,9 @@ def _get_json(url: str, params: dict | None = None) -> Any:
 
 
 def fetch_cve(cve_id: str) -> dict[str, Any] | None:
+    bundle = offline.active()
+    if bundle is not None:
+        return bundle.redhat_cve(cve_id)
     return _get_json(f"{CVE_API}/{cve_id}.json")
 
 
@@ -80,6 +83,7 @@ def search_by_package(
     days_ago: int = 90,
     per_page: int = 50,
 ) -> list[dict]:
+    offline.require_live("audit-package")
     params: dict[str, Any] = {"package": package, "created_days_ago": days_ago, "per_page": per_page}
     if severity:
         params["severity"] = severity

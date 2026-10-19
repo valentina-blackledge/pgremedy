@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from pgremedy import __version__
+from pgremedy import __version__, offline
 from pgremedy.errors import SourceUnavailable, describe
 
 RELEASES_API = "https://api.github.com/repos/CrunchyData/postgres-operator/releases"
@@ -15,6 +15,9 @@ SOURCE = "GitHub (Crunchy PGO releases)"
 
 
 def fetch_releases(per_page: int = 30) -> list[dict]:
+    bundle = offline.active()
+    if bundle is not None:
+        return bundle.crunchy()
     try:
         resp = requests.get(
             RELEASES_API,

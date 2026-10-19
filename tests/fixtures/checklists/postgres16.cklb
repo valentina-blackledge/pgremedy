@@ -1,0 +1,62 @@
+{
+  "title": "pgremedy sample checklist",
+  "id": "11111111-1111-1111-1111-111111111111",
+  "active": false,
+  "mode": 2,
+  "has_path": true,
+  "target_data": {
+    "target_type": "Computing",
+    "host_name": "db01",
+    "ip_address": "10.0.0.5",
+    "mac_address": "",
+    "fqdn": "",
+    "comments": "",
+    "role": "Member Server",
+    "is_web_database": true,
+    "technology_area": "",
+    "web_db_site": "db01",
+    "web_db_instance": "postgres"
+  },
+  "stigs": [
+    {
+      "stig_name": "Crunchy Data Postgres 16 STIG",
+      "display_name": "Crunchy Data Postgres 16 STIG",
+      "stig_id": "CD_Postgres_16",
+      "version": 1,
+      "release_info": "sample",
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "reference_identifier": "0000",
+      "size": 2,
+      "rules": [
+        {
+          "uuid": "00000000-0000-0000-0000-000000000001",
+          "group_id": "V-000001",
+          "rule_id": "SV-000001r1_rule",
+          "severity": "high",
+          "rule_title": "Sample rule that pgremedy must not touch.",
+          "status": "not_a_finding",
+          "overrides": {},
+          "comments": "",
+          "finding_details": "Checked by hand.",
+          "ccis": [
+            "CCI-003376"
+          ]
+        },
+        {
+          "uuid": "00000000-0000-0000-0000-000000283674",
+          "group_id": "V-283674",
+          "rule_id": "SV-283674r1_rule",
+          "severity": "high",
+          "rule_title": "PostgreSQL products must be a version supported by the vendor.",
+          "status": "not_reviewed",
+          "overrides": {},
+          "comments": "Assessor note: confirm with the DBA team.",
+          "finding_details": "",
+          "ccis": [
+            "CCI-003376"
+          ]
+        }
+      ]
+    }
+  ]
+}

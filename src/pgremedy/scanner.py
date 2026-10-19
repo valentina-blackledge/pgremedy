@@ -10,7 +10,7 @@ import psycopg
 from psycopg import conninfo as pg_conninfo
 from rich.console import Console
 
-from pgremedy import branches, pgversion, postupgrade
+from pgremedy import branches, offline, pgversion, postupgrade
 from pgremedy.apis import nvd, postgresql_org
 from pgremedy.errors import ConnectionFailed
 from pgremedy.models import CVEReport, CVSSInfo, DatabaseCheck, ManualFixCheck, ScanResult
@@ -223,10 +223,11 @@ def scan_instance(conninfo: str, severity_min: str = "medium", password: str | N
     pg_version = server.server_version.split(" ")[0]
 
     console.log(f"PostgreSQL {pg_version} ({server.version_num}), {len(server.extensions)} extensions")
-    console.log("Checking release status on postgresql.org...")
+    where = "the offline bundle" if offline.active() else None
+    console.log(f"Checking release status ({where or 'postgresql.org'})...")
     status = branches.branch_status(pg_version, postgresql_org.fetch_versions())
 
-    console.log("Fetching PostgreSQL CVEs from NVD...")
+    console.log(f"Reading PostgreSQL CVEs ({where or 'NVD'})...")
     cves_raw = nvd.fetch_product_cves()
 
     applicable: list[CVEReport] = []
@@ -260,4 +261,5 @@ def scan_instance(conninfo: str, severity_min: str = "medium", password: str | N
         assessment=[{"level": level, "message": msg} for level, msg in branches.assess(status)],
         records_checked=len(cves_raw),
         manual_fixes=manual_fixes,
+        data_source=offline.data_source(),
     )

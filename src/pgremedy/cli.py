@@ -13,7 +13,7 @@ from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
-from pgremedy import branches, pgversion, postupgrade
+from pgremedy import branches, offline, pgversion, postupgrade
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 from pgremedy.errors import ConnectionFailed, SourceUnavailable
 from pgremedy.scanner import NO_CONNECTIONS
@@ -423,14 +423,38 @@ For usage examples on any command, run:
 \b
 Exit codes: 0 when the check ran, 2 when it couldn't (a data
 source was unreachable, the CVE doesn't exist, or the database
-refused the connection).
+refused the connection). `compliance` also exits 1 when a
+check fails or needs review.
+
+\b
+Offline: create a bundle on a connected machine, then point
+any command at it:
+  pgremedy bundle create pg-data.json
+  pgremedy --data pg-data.json scan "service=prod"
 """
 
 
 @click.group(cls=PgRemedyGroup, help=MAIN_HELP)
 @click.version_option(package_name="pgremedy")
-def cli():
-    pass
+@click.option("--data", "data_file", type=click.Path(exists=True, dir_okay=False), envvar="PGREMEDY_DATA",
+              help="Use an offline data bundle (from `pgremedy bundle create`) instead of the network.")
+@click.pass_context
+def cli(ctx, data_file: str | None):
+    offline.deactivate()
+    if not data_file or ctx.invoked_subcommand == "bundle":
+        return
+    try:
+        bundle = offline.activate(data_file)
+    except offline.BundleError as exc:
+        console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+        ctx.exit(EXIT_ERROR)
+    console.print(f"[dim]Using the {escape(bundle.describe())}: no network requests.[/dim]")
+    if bundle.is_stale():
+        console.print(
+            f"[yellow]Warning: the offline bundle is {bundle.age_days()} days old. PostgreSQL ships fixes "
+            "at least quarterly, so newer releases and CVEs may be missing. Refresh it with "
+            "`pgremedy bundle create` on a connected machine.[/yellow]"
+        )
 
 
 @cli.command(cls=ExamplesCommand, epilog=LOOKUP_EXAMPLES)
@@ -496,6 +520,7 @@ def audit(pg_version: str, severity: str | None, fmt: str):
         click.echo(json.dumps({
             "pg_version": pg_version,
             "scope": "branch" if whole_branch else "release",
+            "data_source": offline.data_source(),
             "branch": asdict(status),
             "assessment": [{"level": level, "message": msg} for level, msg in assessment],
             "records_checked": len(cves),
@@ -602,6 +627,7 @@ def scan(conninfo: str, severity_min: str, fmt: str, password_prompt: bool):
     output.print()
     output.rule(f"[bold]Scan: PostgreSQL {result.pg_version}[/bold]")
     output.print(f"Connection: {escape(result.connection_info)}")
+    output.print(f"Data: {escape(offline.describe_source())}")
     output.print(f"Version: {result.pg_version} ({result.pg_version_num})")
     output.print(f"Extensions: {len(result.extensions)} installed")
     output.print()
@@ -669,8 +695,169 @@ def remedy(ctx, cve_id: str, pg_version: str | None, fmt: str):
 def watch(versions: str, interval: int, state_file: str, once: bool):
     """Monitor for new PostgreSQL CVEs and releases."""
     from pgremedy.watcher import run_watch
+    offline.require_live("watch")      # a frozen bundle never shows anything new
     version_list = [v.strip() for v in versions.split(",") if v.strip()]
     run_watch(version_list, interval=interval, state_file=state_file, once=once)
+
+
+COMPLIANCE_EXAMPLES = """
+\b
+Examples:
+  pgremedy compliance "service=prod"
+  pgremedy compliance "postgresql://auditor@db01/postgres" -W --checklist db01.cklb
+  pgremedy --data pg-data.json compliance "service=prod" --format json
+
+\b
+Exit codes: 0 every check passed, 1 at least one failed or needs
+review, 2 the checks couldn't run.
+"""
+
+STATUS_STYLE = {"pass": ("PASS", "bold green"), "fail": ("FAIL", "bold red"), "review": ("REVIEW", "bold yellow")}
+
+
+@cli.command(cls=ExamplesCommand, epilog=COMPLIANCE_EXAMPLES)
+@click.argument("conninfo")
+@click.option("-W", "--password-prompt", is_flag=True,
+              help="Prompt for the password instead of putting it in the connection string.")
+@click.option("--checklist", type=click.Path(exists=True, dir_okay=False),
+              help="STIG Viewer checklist (.ckl or .cklb) to record the STIG result in. The original is kept as <file>.bak.")
+@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
+@click.pass_context
+def compliance(ctx, conninfo: str, password_prompt: bool, checklist: str | None, fmt: str):
+    """Check STIG V-283674 and CIS 1.5: supported version, latest security patches."""
+    from pgremedy.checklists import ChecklistError
+    from pgremedy.checklists import update as update_checklist
+    from pgremedy.compliance import PASS, evaluate
+    from pgremedy.scanner import scan_instance
+
+    password = click.prompt("Password", hide_input=True, err=True) if password_prompt else None
+    result = scan_instance(conninfo, severity_min="unknown", password=password)
+    checks = evaluate(result)
+    updated = None
+    if checklist:
+        try:
+            updated = update_checklist(checklist, checks[0])
+        except ChecklistError as exc:
+            console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+            ctx.exit(EXIT_ERROR)
+
+    if fmt == "json":
+        click.echo(json.dumps({
+            "target": {"connection": result.connection_info, "pg_version": result.pg_version,
+                       "pg_version_num": result.pg_version_num},
+            "data_source": result.data_source,
+            "checks": [asdict(c) for c in checks],
+            "checklist": asdict(updated) if updated else None,
+        }, indent=2))
+    else:
+        _print_compliance(result, checks, updated)
+    ctx.exit(0 if all(c.status == PASS for c in checks) else 1)
+
+
+def _print_compliance(result, checks, updated) -> None:
+    output.print()
+    output.rule(f"[bold]Compliance: PostgreSQL {result.pg_version}[/bold]")
+    output.print(f"Connection: {escape(result.connection_info)}")
+    output.print(f"Data: {escape(offline.describe_source())}")
+    output.print()
+    for c in checks:
+        word, style = STATUS_STYLE[c.status]
+        output.print(f"[{style}]{word:<6}[/{style}]  [bold]{escape(c.label)}[/bold]: {escape(c.title)}")
+        for reason in c.reasons:
+            output.print(f"        {escape(reason)}")
+        if c.fix:
+            output.print(f"        Fix: {escape(c.fix)}")
+        output.print()
+    open_checks = [c for c in checks if c.status != "pass"]
+    if open_checks:
+        output.print(f"{len(open_checks)} of {len(checks)} checks need attention.", end=" ")
+    else:
+        output.print(f"All {len(checks)} checks passed.", end=" ")
+    output.print("[dim]Full evidence: --format json, or the finding details in a checklist.[/dim]")
+    if updated:
+        for rule in updated.rules:
+            output.print(
+                f"Recorded {escape(rule['group_id'] or '?')} ({escape(rule['stig'] or 'STIG')}) in {escape(updated.path)}"
+                f"{f' for asset {escape(updated.asset)}' if updated.asset else ''}: "
+                f"{escape(rule['old_status'] or 'empty')} -> {escape(rule['new_status'])}."
+            )
+        output.print(f"[dim]Original saved as {escape(updated.backup)}.[/dim]")
+
+
+BUNDLE_EXAMPLES = """
+\b
+Examples:
+  pgremedy bundle create pg-data.json                 on a connected machine
+  pgremedy bundle create pg-data.json --no-redhat     faster; no Red Hat records
+  pgremedy bundle info pg-data.json                   age, contents, SHA-256
+
+\b
+Then, on the machine without internet access:
+  pgremedy --data pg-data.json scan "service=prod"
+  PGREMEDY_DATA=pg-data.json pgremedy remedy CVE-2024-10979 --pg-version 16.4
+"""
+
+
+@cli.group(epilog=BUNDLE_EXAMPLES, cls=click.Group)
+def bundle():
+    """Offline data bundles for networks without internet access."""
+
+
+@bundle.command("create", cls=ExamplesCommand, epilog=BUNDLE_EXAMPLES)
+@click.argument("path", type=click.Path(dir_okay=False))
+@click.option("--no-redhat", is_flag=True,
+              help="Skip Red Hat records (about one request per CVE). lookup and remedy then show Red Hat as unavailable.")
+@click.option("--no-crunchy", is_flag=True, help="Skip Crunchy PGO release notes.")
+@click.pass_context
+def bundle_create(ctx, path: str, no_redhat: bool, no_crunchy: bool):
+    """Download everything the checks need into one file."""
+    try:
+        created = offline.create(
+            path,
+            fetch_nvd=nvd.fetch_product_cves,
+            fetch_versions=postgresql_org.fetch_versions,
+            fetch_redhat=None if no_redhat else redhat.fetch_cve,
+            fetch_crunchy=None if no_crunchy else crunchy.fetch_releases,
+            progress=console.log,
+        )
+    except SourceUnavailable as exc:
+        console.print(
+            f"[bold red]Error:[/bold red] couldn't get data from {escape(exc.source)} ({escape(exc.reason)}). "
+            "No bundle was written."
+        )
+        if exc.source == "Red Hat":
+            console.print("Retry later, or use --no-redhat to build a bundle without Red Hat records.")
+        ctx.exit(EXIT_ERROR)
+    _print_bundle(created)
+    output.print(f"\nCopy it to the offline machine, check the SHA-256 there, then run commands with --data {escape(path)}")
+
+
+@bundle.command("info", cls=ExamplesCommand, epilog=BUNDLE_EXAMPLES)
+@click.argument("path", type=click.Path(exists=True, dir_okay=False))
+@click.pass_context
+def bundle_info(ctx, path: str):
+    """Show a bundle's age, contents and SHA-256."""
+    try:
+        loaded = offline.load(path)
+    except offline.BundleError as exc:
+        console.print(f"[bold red]Error:[/bold red] {escape(str(exc))}")
+        ctx.exit(EXIT_ERROR)
+    _print_bundle(loaded)
+
+
+def _print_bundle(b: offline.Bundle) -> None:
+    redhat_text = ("not included" if b.redhat_cves is None
+                   else f"{sum(1 for v in b.redhat_cves.values() if v is not None)} records")
+    crunchy_text = "not included" if b.crunchy_releases is None else f"{len(b.crunchy_releases)} releases"
+    output.print(f"Bundle: {escape(b.path)}")
+    output.print(f"Created: {b.created_at:%Y-%m-%d %H:%M} UTC ({b.age_days()} days old) by pgremedy {escape(b.pgremedy_version)}")
+    output.print(f"NVD: {len(b.nvd_cves)} PostgreSQL CVEs")
+    output.print(f"postgresql.org: {len(b.postgresql_versions)} branches")
+    output.print(f"Red Hat: {redhat_text}")
+    output.print(f"Crunchy PGO: {crunchy_text}")
+    output.print(f"SHA-256: {b.sha256}")
+    if b.is_stale():
+        output.print(f"[yellow]Older than {offline.STALE_AFTER_DAYS} days: newer releases and CVEs may be missing.[/yellow]")
 
 
 if __name__ == "__main__":
