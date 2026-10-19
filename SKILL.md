@@ -17,7 +17,7 @@ description: "PostgreSQL CVE detection, remediation, and monitoring. Use for: lo
 ## Prerequisites
 
 - `uv` installed (for running the tool)
-- Internet access (NVD, Red Hat, Crunchy Data APIs)
+- Internet access (NVD, Red Hat, Crunchy Data APIs), or an offline bundle (see Offline bundles)
 - For `scan`: network access to the target PostgreSQL instance
 
 ## Commands
@@ -33,7 +33,7 @@ uv run --project <SKILL_DIR> python -m pgremedy <command> [args]
 uv run --project <SKILL_DIR> python -m pgremedy lookup <CVE-ID> [--type postgresql|golang|base-image] [--format table|json]
 ```
 
-Auto-detects CVE type (PostgreSQL, Go, base-image) from NVD CPE data. Use `--type` to force.
+For a PostgreSQL server CVE: the affected releases per branch, the first fixed release in each, and the advisory link. If the output says the CVE "affects other products, not the PostgreSQL server" (a driver such as pgjdbc, an add-on, a distro package), say so: upgrading the server doesn't fix it. Red Hat's section lists every fixed package with its RHEL product and advisory. `--type` only overrides the category in JSON.
 
 **When:** User provides a CVE-ID (e.g., CVE-2024-10978).
 
@@ -43,7 +43,7 @@ Auto-detects CVE type (PostgreSQL, Go, base-image) from NVD CPE data. Use `--typ
 uv run --project <SKILL_DIR> python -m pgremedy audit <PG-VERSION> [--severity critical,high] [--format table|json]
 ```
 
-With a release (16.4), lists the CVEs affecting that release. With a branch (16), lists every CVE that affected any 16.x release. Each result includes the fixing release for that branch. Starts with the branch's support status (latest minor, end-of-life).
+With a release (16.4), lists the CVEs affecting that release. With a branch (16), lists every CVE that affected any 16.x release. Each result includes the fixing release for that branch. Starts with the branch's support status (latest minor, end-of-life). `--severity` takes NVD's scale (critical, high, medium, low); any other value exits 2.
 
 **When:** User provides a PG version (e.g., 16.4, 14.9).
 
@@ -53,7 +53,7 @@ With a release (16.4), lists the CVEs affecting that release. With a branch (16)
 uv run --project <SKILL_DIR> python -m pgremedy audit-package <PACKAGE> [--severity important] [--days-ago 180] [--format table|json]
 ```
 
-Searches Red Hat Security API for recent CVEs on a package (golang, openssl, glibc, etc.).
+Searches Red Hat Security API for recent CVEs on a package (golang, openssl, glibc, etc.), reading every page of results. `--severity` takes Red Hat's scale (critical, important, moderate, low), not NVD's.
 
 **When:** User asks about CVEs for a specific package.
 
@@ -160,5 +160,6 @@ If the output says the branch is end-of-life, lead with that. NVD has no affecte
 
 - **NVD rate limited**: The tool spaces requests (6s apart, 0.6s with `NVD_API_KEY` set) and retries. If NVD still refuses, it exits 2 and suggests setting `NVD_API_KEY`.
 - **Red Hat data unavailable**: Supplement with `web_fetch` on `https://access.redhat.com/security/cve/<CVE_ID>`
+- **Crunchy data unavailable (GitHub rate limit)**: Set `GITHUB_TOKEN`; without one GitHub allows 60 requests an hour
 - **CVE type misdetected**: Use `--type` flag to force correct detection
 - **Connection refused on scan**: Verify network access and pg_hba.conf allows the connection
