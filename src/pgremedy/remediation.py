@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from rich.console import Console
 
 from pgremedy.apis import crunchy, nvd, redhat
+from pgremedy.errors import SourceUnavailable
 
 console = Console(stderr=True)
 
@@ -69,20 +69,14 @@ def _match_mitigations(description: str) -> list[str]:
 
 
 def generate_remediation(cve_id: str, pg_version: str | None = None) -> dict[str, Any]:
+    """Remediation steps for a CVE. Raises SourceUnavailable if NVD can't be reached."""
     console.log(f"Generating remediation for {cve_id}...")
 
     nvd_data = nvd.fetch_cve(cve_id)
-    nvd.rate_limit_pause()
-
     if not nvd_data:
-        return {"cve_id": cve_id, "error": f"CVE {cve_id} not found in NVD"}
+        return {"cve_id": cve_id, "error": f"NVD has no record of {cve_id}"}
 
-    description = ""
-    for d in nvd_data.get("descriptions", []):
-        if d.get("lang") == "en":
-            description = d["value"]
-            break
-
+    description = nvd.english_description(nvd_data)
     cvss = nvd.extract_cvss(nvd_data)
     fix_version = nvd.find_fix_version(nvd_data, pg_version=pg_version)
 
@@ -113,7 +107,13 @@ def generate_remediation(cve_id: str, pg_version: str | None = None) -> dict[str
         mitigations.append("No automated mitigation available — review the CVE description and upstream advisory for manual workarounds")
     result["mitigations"] = mitigations
 
-    rh = redhat.fetch_cve(cve_id)
+    source_errors: dict[str, str] = {}
+
+    try:
+        rh = redhat.fetch_cve(cve_id)
+    except SourceUnavailable as exc:
+        source_errors["redhat"] = exc.reason
+        rh = None
     if rh:
         rh_status: dict[str, Any] = {
             "fix_state": rh.get("fix_state", "Unknown"),
@@ -126,9 +126,14 @@ def generate_remediation(cve_id: str, pg_version: str | None = None) -> dict[str
             rh_status["patches"] = patches
         result["redhat_status"] = rh_status
 
-    crunchy_releases = crunchy.fetch_releases()
-    cr = crunchy.find_cve_in_releases(cve_id, crunchy_releases)
+    try:
+        cr = crunchy.find_cve_in_releases(cve_id, crunchy.fetch_releases())
+    except SourceUnavailable as exc:
+        source_errors["crunchy"] = exc.reason
+        cr = None
     if cr:
         result["crunchy_status"] = cr
 
+    if source_errors:
+        result["source_errors"] = source_errors
     return result

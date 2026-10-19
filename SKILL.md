@@ -43,7 +43,7 @@ Auto-detects CVE type (PostgreSQL, Go, base-image) from NVD CPE data. Use `--typ
 uv run --project <SKILL_DIR> python -m pgremedy audit <PG-VERSION> [--severity critical,high] [--format table|json]
 ```
 
-Searches NVD for CVEs affecting the given major version, sorted by CVSS score.
+With a release (16.4), lists the CVEs affecting that release. With a branch (16), lists every CVE that affected any 16.x release. Each result includes the fixing release for that branch. Starts with the branch's support status (latest minor, end-of-life).
 
 **When:** User provides a PG version (e.g., 16.4, 14.9).
 
@@ -63,7 +63,7 @@ Searches Red Hat Security API for recent CVEs on a package (golang, openssl, gli
 uv run --project <SKILL_DIR> python -m pgremedy scan "<CONNECTION-STRING>" [--severity-min medium] [--format table|json]
 ```
 
-Connects to a live Postgres instance, detects version and extensions, then cross-references NVD for applicable CVEs.
+Connects to a live Postgres instance and reads its version. Checks that version against postgresql.org: is it the latest minor release, and is the branch end-of-life? Then lists the NVD CVEs that apply, with the fixing release.
 
 **Connection string formats:**
 - `postgresql://user:pass@host:port/dbname`
@@ -92,7 +92,7 @@ For a given CVE, generates:
 uv run --project <SKILL_DIR> python -m pgremedy watch --versions 16,17 [--interval 3600] [--once] [--state-file ~/.pgremedy/watch.json]
 ```
 
-Polls NVD for new CVEs matching tracked PG versions. Stores seen-state to avoid duplicate alerts. Use `--once` for a single check.
+The first run records a baseline without alerting. Later runs report new CVEs for the tracked branches, new minor releases, and end-of-life notices. Stores seen-state to avoid duplicate alerts. Use `--once` for a single check.
 
 **When:** User wants ongoing monitoring. Suitable for cron jobs.
 
@@ -113,6 +113,10 @@ Polls NVD for new CVEs matching tracked PG versions. Stores seen-state to avoid 
 
 Execute the appropriate command and present results to the user.
 
+**Check the exit code.** Exit code 2 means the check did not run: a data source was unreachable, the CVE doesn't exist, or the database refused the connection. Report the error. Never present it as "no vulnerabilities found."
+
+If the output says the branch is end-of-life, lead with that. NVD has no affected-version data for end-of-life branches, so an empty CVE list there does not mean the server is safe.
+
 ### Step 3: Follow Up
 
 - After `audit` or `scan`: Offer to run `lookup` or `remedy` on specific CVEs
@@ -127,7 +131,7 @@ Execute the appropriate command and present results to the user.
 
 ## Troubleshooting
 
-- **NVD rate limited**: The tool waits 6s between requests automatically
+- **NVD rate limited**: The tool spaces requests (6s apart, 0.6s with `NVD_API_KEY` set) and retries. If NVD still refuses, it exits 2 and suggests setting `NVD_API_KEY`.
 - **Red Hat data unavailable**: Supplement with `web_fetch` on `https://access.redhat.com/security/cve/<CVE_ID>`
 - **CVE type misdetected**: Use `--type` flag to force correct detection
 - **Connection refused on scan**: Verify network access and pg_hba.conf allows the connection

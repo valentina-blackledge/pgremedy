@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from pgremedy.branches import BranchStatus
+
 
 @dataclass
 class CVSSInfo:
@@ -37,14 +39,6 @@ class RedHatInfo:
 
 
 @dataclass
-class ErrataEntry:
-    id: str
-    synopsis: str
-    severity: str
-    released_on: str = ""
-
-
-@dataclass
 class CrunchyInfo:
     release_tag: str
     release_name: str
@@ -60,10 +54,12 @@ class CVEReport:
     description: str = ""
     cvss: CVSSInfo = field(default_factory=CVSSInfo)
     affected_versions: list[str] = field(default_factory=list)
+    fixed_in: str | None = None
     redhat: RedHatInfo | None = None
-    errata: list[ErrataEntry] = field(default_factory=list)
     crunchy: CrunchyInfo | None = None
     references: list[str] = field(default_factory=list)
+    # Sources that couldn't be reached, e.g. {"redhat": "could not connect"}.
+    source_errors: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -73,3 +69,6 @@ class ScanResult:
     extensions: list[dict] = field(default_factory=list)
     cves: list[CVEReport] = field(default_factory=list)
     connection_info: str = ""
+    branch: BranchStatus | None = None
+    assessment: list[dict] = field(default_factory=list)
+    records_checked: int = 0
