@@ -18,6 +18,7 @@ reads. Each file in `nvd/` is the `cve` object NVD returns inside
 | `postgresql_org_versions.json` | Subset of https://www.postgresql.org/versions.json (9.6 and 12–18). |
 | `checklists/*.ckl`, `*.cklb` | Small STIG Viewer checklists written for these tests, in the structure STIG Viewer 2 (`.ckl`, XML) and 3 (`.cklb`, JSON) use (checked against STIG Manager's sample files). Rule V-283674 is the real version rule; V-000001 and V-999998 are made-up IDs (an unrelated rule, and the version rule under a changed ID). |
 | `redhat/CVE-2026-6471.json` | Red Hat record with a real workaround. Structure as served (`mitigation` is `{"value", "lang"}`); the text is a paraphrase of Red Hat's, not a copy. |
+| `redhat/CVE-2024-10979.json` | Red Hat record with 30 fixed packages across 14 RHEL products, plus one product without a fix (RHEL 6, "Out of support scope"). Every RHEL 9 package comes after the first eight. Restated field by field from the live record on 2026-10-18 (product names, advisories, packages and states as published); fields pgremedy doesn't read are left out. |
 | `redhat/CVE-2024-7348.json` | Red Hat record whose mitigation is Red Hat's "not available" boilerplate (the opening words are copied; the rest is cut). |
 
 Descriptions are shortened. CVSS metrics are included only where they were

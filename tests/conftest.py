@@ -81,6 +81,8 @@ def isolated(monkeypatch):
     monkeypatch.setattr(offline, "_pause", lambda seconds: None)
     monkeypatch.delenv("PGREMEDY_DATA", raising=False)
     monkeypatch.delenv("NVD_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.setenv("COLUMNS", "300")   # keep Rich from wrapping lines tests look for
 
 
@@ -106,11 +108,19 @@ def redhat_records() -> dict[str, dict]:
     return {p.stem: json.loads(p.read_text()) for p in sorted((FIXTURES / "redhat").glob("*.json"))}
 
 
+PGO_RELEASES = [   # made-up release notes in GitHub's format; neither mentions a fixture CVE
+    {"tag_name": "v5.8.4", "name": "v5.8.4", "body": "Updates the base images.", "prerelease": False,
+     "published_at": "2026-09-30T12:00:00Z", "html_url": "https://example.test/v5.8.4"},
+    {"tag_name": "v5.8.3", "name": "v5.8.3", "body": "Bug fixes.", "prerelease": False,
+     "published_at": "2026-08-20T12:00:00Z", "html_url": "https://example.test/v5.8.3"},
+]
+
+
 class World:
     """Healthy sources by default: NVD serves the fixture records, Red Hat serves
-    the records in `redhat` (404 otherwise), GitHub lists no releases. Tests
-    change `product`, `modified`, `versions` or `redhat`, or call
-    `http.down(...)` to simulate an outage."""
+    the records in `redhat` (404 otherwise), GitHub serves `releases` page by
+    page. Tests change `product`, `modified`, `versions`, `redhat` or
+    `releases`, or call `http.down(...)` to simulate an outage."""
 
     def __init__(self, http: Router, records: dict[str, dict], versions: list[dict]):
         self.http = http
@@ -119,10 +129,15 @@ class World:
         self.modified: list[dict] = []
         self.versions = copy.deepcopy(versions)
         self.redhat: dict[str, dict] = {}
+        self.releases: list[dict] = copy.deepcopy(PGO_RELEASES)
         http.add(nvd.API_BASE, self._nvd)
         http.add(postgresql_org.VERSIONS_URL, lambda url, params: FakeResponse(200, self.versions))
         http.add(redhat.CVE_API, self._redhat)
-        http.add(crunchy.RELEASES_API, lambda url, params: FakeResponse(200, []))
+        http.add(crunchy.RELEASES_API, self._github)
+
+    def _github(self, url, params):
+        page, size = int(params.get("page", 1)), int(params.get("per_page", 30))
+        return FakeResponse(200, self.releases[(page - 1) * size:page * size])
 
     def _redhat(self, url, params):
         record = self.redhat.get(url.rsplit("/", 1)[-1].removesuffix(".json"))

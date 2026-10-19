@@ -17,6 +17,7 @@ class CVSSInfo:
 
 @dataclass
 class RedHatPackageState:
+    """A product Red Hat hasn't fixed with an advisory, and why ("Out of support scope")."""
     package_name: str
     product_name: str
     fix_state: str
@@ -24,14 +25,17 @@ class RedHatPackageState:
 
 @dataclass
 class RedHatPatch:
+    """A fixed package: which product it's for and the advisory that ships it."""
     package: str
     advisory: str
+    product_name: str = ""
 
 
 @dataclass
 class RedHatInfo:
+    # Red Hat records the fix state per product, so there's no single state here:
+    # patches are the fixed packages, package_states the rest.
     severity: str = "Unknown"
-    fix_state: str = "Unknown"
     upstream_fix: str | None = None
     bugzilla_url: str | None = None
     patches: list[RedHatPatch] = field(default_factory=list)
@@ -50,13 +54,22 @@ class CrunchyInfo:
 @dataclass
 class CVEReport:
     cve_id: str
-    cve_type: str = "postgresql"
+    cve_type: str = "postgresql"     # postgresql (the server), golang or base-image (anything else)
     description: str = ""
     cvss: CVSSInfo = field(default_factory=CVSSInfo)
+    # Affected PostgreSQL server releases in words ("16.0 to 16.4"); empty when
+    # the CVE isn't about the server.
     affected_versions: list[str] = field(default_factory=list)
-    fixed_in: str | None = None
+    fixed_in: str | None = None      # scan and audit: the fix in the server's own branch
+    # lookup only:
+    nvd_status: str | None = None
+    analyzed: bool = True            # False while NVD hasn't recorded affected products
+    product_versions: dict[str, list[str]] = field(default_factory=dict)   # every vulnerable product
+    fixes: dict[str, str] = field(default_factory=dict)     # first fixed release per branch
+    advisory_url: str | None = None
     redhat: RedHatInfo | None = None
     crunchy: CrunchyInfo | None = None
+    crunchy_releases_searched: int | None = None
     references: list[str] = field(default_factory=list)
     # Sources that couldn't be reached, e.g. {"redhat": "could not connect"}.
     source_errors: dict[str, str] = field(default_factory=dict)
@@ -161,6 +174,7 @@ class RemediationReport:
     manual_step: ManualStep | None = None
     redhat: RedHatInfo | None = None
     crunchy: CrunchyInfo | None = None
+    crunchy_releases_searched: int | None = None
     source_errors: dict[str, str] = field(default_factory=dict)
 
 

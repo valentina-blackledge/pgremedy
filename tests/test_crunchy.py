@@ -2,7 +2,9 @@
 
 import pytest
 
+from conftest import FakeResponse
 from pgremedy.apis import crunchy
+from pgremedy.errors import SourceUnavailable
 
 RELEASES = [
     {"tag_name": "v5.8.9", "name": "v5.8.9", "body": "Updates the base image for CVE-2024-10978.",
@@ -25,3 +27,22 @@ def test_exact_id_matches_in_the_name_ignoring_case():
     found = crunchy.find_cve_in_releases("CVE-2026-6471", RELEASES)
     assert found["release_tag"] == "v6.0.3"
     assert found["published"] == "2026-09-15"
+
+
+# ── fetching ─────────────────────────────────────────────────────────────────
+
+def test_follows_every_page_and_stops_at_a_short_one(http, monkeypatch):
+    monkeypatch.setattr(crunchy, "PAGE_SIZE", 2)
+    pool = [{"tag_name": f"v5.{n}.0"} for n in range(5)]
+    http.add(crunchy.RELEASES_API, lambda url, params: FakeResponse(
+        200, pool[(params["page"] - 1) * 2:params["page"] * 2]))
+    assert [r["tag_name"] for r in crunchy.fetch_releases()] == [r["tag_name"] for r in pool]
+    assert [c["params"]["page"] for c in http.calls] == [1, 2, 3]
+
+
+def test_more_releases_than_it_reads_is_an_error(http, monkeypatch):
+    monkeypatch.setattr(crunchy, "PAGE_SIZE", 1)
+    monkeypatch.setattr(crunchy, "MAX_PAGES", 3)
+    http.add(crunchy.RELEASES_API, lambda url, params: FakeResponse(200, [{"tag_name": "v5.0.0"}]))
+    with pytest.raises(SourceUnavailable, match="more than 3 releases"):
+        crunchy.fetch_releases()

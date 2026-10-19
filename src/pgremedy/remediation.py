@@ -227,9 +227,11 @@ def _add_vendor_data(report: RemediationReport) -> None:
                 report.mitigations.append(Mitigation(source="Red Hat", text=text))
 
     try:
-        cr = crunchy.find_cve_in_releases(report.cve_id, crunchy.fetch_releases())
+        releases = crunchy.fetch_releases()
     except SourceUnavailable as exc:
         report.source_errors["crunchy"] = exc.reason
     else:
+        report.crunchy_releases_searched = len(releases)
+        cr = crunchy.find_cve_in_releases(report.cve_id, releases)
         if cr:
             report.crunchy = CrunchyInfo(**cr)

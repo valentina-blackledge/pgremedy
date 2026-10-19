@@ -10,12 +10,14 @@ import click
 import psycopg
 from rich.console import Console
 from rich.markup import escape
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 
 from pgremedy import branches, offline, pgversion, postupgrade
 from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
 from pgremedy.errors import ConnectionFailed, SourceUnavailable
+from pgremedy.remediation import ADVISORY_URL
 from pgremedy.scanner import NO_CONNECTIONS
 from pgremedy.models import (
     CVEReport,
@@ -78,6 +80,32 @@ def _pg_release(ctx, param, value: str | None) -> str | None:
     return value.strip()
 
 
+NVD_SEVERITIES = ("critical", "high", "medium", "low")
+# The nearest word on the other scale, for people who mix up NVD's and Red Hat's.
+NEAREST_SEVERITY = {"important": "high", "moderate": "medium", "high": "important", "medium": "moderate"}
+
+
+def _severities(allowed: tuple[str, ...], scale: str, other_scale: str):
+    """Click callback for a comma-separated list of severities.
+
+    A value that isn't on the scale would match nothing and look like a clean
+    result, so it's an error instead (exit code 2).
+    """
+    def callback(ctx, param, value: str | None) -> list[str] | None:
+        if value is None:
+            return None
+        chosen = [s.strip().lower() for s in value.split(",") if s.strip()]
+        if not chosen:
+            raise click.BadParameter(f"give at least one of {', '.join(allowed)}.")
+        for s in chosen:
+            if s not in allowed:
+                hint = (f" '{s}' is on {other_scale}'s scale; the nearest {scale} severity is "
+                        f"'{NEAREST_SEVERITY[s]}'." if NEAREST_SEVERITY.get(s) in allowed else "")
+                raise click.BadParameter(f"'{s}' isn't one of {scale}'s severities ({', '.join(allowed)}).{hint}")
+        return chosen
+    return callback
+
+
 def _truncate(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width].rstrip() + "..."
 
@@ -95,13 +123,23 @@ def _build_report(cve_id: str, forced_type: str | None = None) -> CVEReport | No
     if nvd_data is None:
         return None
 
-    cve_type = forced_type or nvd.detect_type(nvd_data)
+    detected = nvd.detect_type(nvd_data)
+    cve_type = forced_type or detected
     console.log(f"CVE type: {cve_type}")
 
     report = CVEReport(cve_id=cve_id, cve_type=cve_type)
     report.description = nvd.english_description(nvd_data)
     report.cvss = CVSSInfo(**nvd.extract_cvss(nvd_data))
-    report.affected_versions = nvd.extract_affected_versions(nvd_data, cve_type)
+    report.nvd_status = nvd_data.get("vulnStatus")
+    report.analyzed = nvd.has_affected_data(nvd_data)
+    # What NVD marks vulnerable decides what's shown, whatever --type says.
+    report.product_versions = nvd.product_versions(nvd_data)
+    report.affected_versions = report.product_versions.get(nvd.SERVER_LABEL, [])
+    if nvd.SERVER_LABEL in report.product_versions:
+        report.fixes = nvd.fixes_by_branch(nvd_data)
+        report.advisory_url = ADVISORY_URL.format(cve_id=cve_id)
+    elif not report.analyzed and detected == "postgresql":
+        report.advisory_url = ADVISORY_URL.format(cve_id=cve_id)
     report.references = [r.get("url", "") for r in nvd_data.get("references", [])[:5]]
 
     try:
@@ -113,12 +151,14 @@ def _build_report(cve_id: str, forced_type: str | None = None) -> CVEReport | No
         report.redhat = redhat.to_info(rh)
 
     try:
-        cr = crunchy.find_cve_in_releases(cve_id, crunchy.fetch_releases())
+        releases = crunchy.fetch_releases()
     except SourceUnavailable as exc:
         report.source_errors["crunchy"] = exc.reason
-        cr = None
-    if cr:
-        report.crunchy = CrunchyInfo(**cr)
+    else:
+        report.crunchy_releases_searched = len(releases)
+        cr = crunchy.find_cve_in_releases(cve_id, releases)
+        if cr:
+            report.crunchy = CrunchyInfo(**cr)
 
     return report
 
@@ -166,34 +206,56 @@ def _print_manual_fixes(checks: list[ManualFixCheck], pg_version: str) -> None:
     output.print()
 
 
+RHEL_PREFIX = re.compile(r"^Red Hat Enterprise Linux\b")   # shortened to "RHEL" in tables
+
+
+def _redhat_summary(rh: RedHatInfo) -> str:
+    """ "Fixed: 14 products (30 packages). Out of support scope: 1 product." """
+    parts = []
+    if rh.patches:
+        products = {p.product_name for p in rh.patches}
+        parts.append(f"Fixed: {_plural(len(products), 'product')} ({_plural(len(rh.patches), 'package')}).")
+    states: dict[str, int] = {}
+    for s in rh.package_states:
+        states[s.fix_state] = states.get(s.fix_state, 0) + 1
+    parts.extend(f"{state}: {_plural(n, 'product')}." for state, n in states.items())
+    return " ".join(parts) or "No packages listed."
+
+
 def _print_redhat(rh: RedHatInfo | None, error: str | None) -> None:
     output.print("[bold]Red Hat Status[/bold]")
     if error:
-        output.print(f"  [yellow]Unavailable: couldn't reach Red Hat ({escape(error)})[/yellow]")
+        output.print(f"  [yellow]Unavailable: couldn't get data from Red Hat ({escape(error)})[/yellow]")
     elif rh:
-        output.print(f"  Severity: {rh.severity}")
-        output.print(f"  Fix State: {rh.fix_state}")
+        output.print(f"  Severity: {escape(rh.severity)}")
+        output.print(f"  {escape(_redhat_summary(rh))}")
         if rh.upstream_fix:
             output.print(f"  Upstream Fix: {escape(rh.upstream_fix)}")
         if rh.bugzilla_url:
             output.print(f"  Bugzilla: {rh.bugzilla_url}")
-        if rh.patches:
-            output.print("  Patched Packages:")
-            for p in rh.patches:
-                output.print(f"    {escape(p.package)} via {p.advisory}")
-        if rh.package_states:
-            output.print("  Package State:")
-            for ps in rh.package_states:
-                output.print(f"    {escape(ps.package_name)} ({escape(ps.product_name)}): {ps.fix_state}")
+        # Every package, with its product: the RHEL release a user runs can be
+        # anywhere in a list of dozens. Package names are never cut short.
+        rows = [(p.product_name, "Fixed", p.advisory, p.package) for p in rh.patches]
+        rows += [(s.product_name, s.fix_state, "", s.package_name) for s in rh.package_states]
+        if rows:
+            t = Table(box=None, padding=(0, 2), pad_edge=False)
+            t.add_column("Product")
+            t.add_column("State", max_width=13)
+            t.add_column("Advisory", no_wrap=True)
+            t.add_column("Package", overflow="fold")
+            for product, state, advisory, package in rows:
+                t.add_row(escape(RHEL_PREFIX.sub("RHEL", product)) or "—", escape(state),
+                          escape(advisory) or "—", escape(package) or "—")
+            output.print(Padding(t, (0, 0, 0, 2)))
     else:
         output.print("  [dim]Red Hat has no record of this CVE[/dim]")
     output.print()
 
 
-def _print_crunchy(cr: CrunchyInfo | None, error: str | None) -> None:
+def _print_crunchy(cr: CrunchyInfo | None, error: str | None, searched: int | None = None) -> None:
     output.print("[bold]Crunchy Data Status[/bold]")
     if error:
-        output.print(f"  [yellow]Unavailable: couldn't reach GitHub ({escape(error)})[/yellow]")
+        output.print(f"  [yellow]Unavailable: couldn't get PGO release notes from GitHub ({escape(error)})[/yellow]")
     elif cr:
         output.print(f"  PGO Release: {cr.release_tag} ({escape(cr.release_name or '')})")
         output.print(f"  Published: {cr.published}")
@@ -201,6 +263,9 @@ def _print_crunchy(cr: CrunchyInfo | None, error: str | None) -> None:
             output.print("  [yellow]Status: Pre-release (not yet GA)[/yellow]")
         if cr.url:
             output.print(f"  Details: {cr.url}")
+    elif searched is not None:
+        output.print(f"  [dim]Not mentioned in the release notes of the {_plural(searched, 'PGO release')} "
+                     "on GitHub[/dim]")
     else:
         output.print("  [dim]No Crunchy advisory found[/dim]")
     output.print()
@@ -291,33 +356,73 @@ def _print_remediation(report: RemediationReport) -> None:
     output.print()
 
     _print_redhat(report.redhat, report.source_errors.get("redhat"))
-    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"))
+    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"), report.crunchy_releases_searched)
+
+
+VERSIONS_SHOWN = 12
+
+
+def _versions_text(versions: list[str]) -> str:
+    more = len(versions) - VERSIONS_SHOWN
+    shown = ", ".join(versions[:VERSIONS_SHOWN])
+    return f"{shown}, and {more} more (--format json lists them all)" if more > 0 else shown
+
+
+def _products_text(products: dict[str, list[str]]) -> str:
+    return "\n".join(f"{label}: {_versions_text(v)}" if v else label for label, v in products.items())
 
 
 def _print_report(report: CVEReport) -> None:
     output.print()
     output.rule(f"[bold]{report.cve_id}[/bold]")
-    if report.cve_type != "postgresql":
-        output.print(f"[dim]Type:[/dim] {report.cve_type.replace('-', ' ').title()}")
     output.print()
 
     if report.description:
         output.print(escape(report.description))
         output.print()
 
+    server = report.product_versions.get(nvd.SERVER_LABEL)
+    others = {label: v for label, v in report.product_versions.items() if label != nvd.SERVER_LABEL}
+    if not report.analyzed:
+        output.print(
+            "[yellow]NVD hasn't recorded which products or versions this CVE affects yet "
+            f"(status: {escape(report.nvd_status or 'unknown')}).[/yellow]"
+        )
+        if report.advisory_url:
+            output.print(f"If it's a PostgreSQL server CVE, its advisory lists the fixed releases: {report.advisory_url}")
+        output.print()
+    elif server is None:
+        output.print(
+            "This CVE affects other products, not the PostgreSQL server: "
+            f"{escape(', '.join(others) or 'unnamed products')}."
+        )
+        output.print()
+
     t = Table(show_header=False, box=None, padding=(0, 2))
     t.add_column("Field", style="bold")
     t.add_column("Value")
-    sev_text = Text(f"{report.cvss.score} ({report.cvss.severity})")
-    sev_text.stylize(_severity_style(report.cvss.severity))
+    if report.cvss.score is None:
+        sev_text = Text("not scored yet", style="dim")
+    else:
+        sev_text = Text(f"{report.cvss.score} ({report.cvss.severity})")
+        sev_text.stylize(_severity_style(report.cvss.severity))
     t.add_row("CVSS", sev_text)
     t.add_row("Attack Vector", report.cvss.vector)
-    t.add_row("Affected", ", ".join(report.affected_versions))
+    if server is not None:
+        t.add_row("Affected", escape(_versions_text(server)) or "[dim]no releases listed; see the advisory[/dim]")
+        if report.fixes:
+            t.add_row("Fixed in", ", ".join(report.fixes.values()))
+        if others:
+            t.add_row("Also affects", escape(_products_text(others)))
+        if report.advisory_url:
+            t.add_row("Advisory", report.advisory_url)
+    elif others:
+        t.add_row("Affected", escape(_products_text(others)))
     output.print(t)
     output.print()
 
     _print_redhat(report.redhat, report.source_errors.get("redhat"))
-    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"))
+    _print_crunchy(report.crunchy, report.source_errors.get("crunchy"), report.crunchy_releases_searched)
 
     if report.references:
         output.print("[bold]References[/bold]")
@@ -459,7 +564,9 @@ def cli(ctx, data_file: str | None):
 
 @cli.command(cls=ExamplesCommand, epilog=LOOKUP_EXAMPLES)
 @click.argument("cve_id", callback=_cve_id)
-@click.option("--type", "forced_type", type=click.Choice(["postgresql", "golang", "base-image"]), help="Force CVE type.")
+@click.option("--type", "forced_type", type=click.Choice(["postgresql", "golang", "base-image"]),
+              help="Override the detected category (cve_type in JSON). Affected products and versions "
+                   "always come from NVD's data.")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
 @click.pass_context
 def lookup(ctx, cve_id: str, forced_type: str | None, fmt: str):
@@ -476,9 +583,10 @@ def lookup(ctx, cve_id: str, forced_type: str | None, fmt: str):
 
 @cli.command(cls=ExamplesCommand, epilog=AUDIT_EXAMPLES)
 @click.argument("pg_version", callback=_pg_version)
-@click.option("--severity", help="Filter: critical,high,medium,low (comma-separated)")
+@click.option("--severity", callback=_severities(NVD_SEVERITIES, "NVD", "Red Hat"),
+              help="Filter on NVD's scale: critical,high,medium,low (comma-separated).")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
-def audit(pg_version: str, severity: str | None, fmt: str):
+def audit(pg_version: str, severity: list[str] | None, fmt: str):
     """Audit a PostgreSQL release (16.2) or a whole branch (16) for known CVEs."""
     whole_branch = pgversion.is_branch(pg_version)
     major = pgversion.major_of(pg_version)
@@ -494,7 +602,7 @@ def audit(pg_version: str, severity: str | None, fmt: str):
         )))
     cves = nvd.fetch_product_cves()
 
-    severity_filter = [s.strip().upper() for s in severity.split(",")] if severity else None
+    severity_filter = [s.upper() for s in severity] if severity else None
     results = []
     for cve_data in cves:
         match = nvd.check_branch(cve_data, major) if whole_branch else nvd.check_version(cve_data, pg_version)
@@ -566,13 +674,14 @@ def audit(pg_version: str, severity: str | None, fmt: str):
 
 @cli.command("audit-package", cls=ExamplesCommand, epilog=AUDIT_PACKAGE_EXAMPLES)
 @click.argument("package")
-@click.option("--severity", help="Filter: critical,important,moderate,low")
-@click.option("--days-ago", default=90, type=int, help="How far back to search.")
+@click.option("--severity", callback=_severities(redhat.SEVERITIES, "Red Hat", "NVD"),
+              help="Filter on Red Hat's scale: critical,important,moderate,low (comma-separated).")
+@click.option("--days-ago", default=90, type=click.IntRange(min=1), help="How far back to search.")
 @click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table")
-def audit_package(package: str, severity: str | None, days_ago: int, fmt: str):
+def audit_package(package: str, severity: list[str] | None, days_ago: int, fmt: str):
     """Audit a Red Hat package for recent CVEs."""
     console.log(f"Searching Red Hat CVEs for '{package}' (last {days_ago} days)...")
-    cves = redhat.search_by_package(package, severity=severity, days_ago=days_ago)
+    cves = redhat.search_by_package(package, severity=",".join(severity) if severity else None, days_ago=days_ago)
 
     if fmt == "json":
         click.echo(json.dumps({"package": package, "count": len(cves), "results": cves}, indent=2, default=str))
@@ -582,7 +691,7 @@ def audit_package(package: str, severity: str | None, days_ago: int, fmt: str):
     output.rule(f"[bold]Package Audit: {escape(package)}[/bold]")
     output.print(f"Found [bold]{len(cves)}[/bold] CVEs from Red Hat (last {days_ago} days)")
     if severity:
-        output.print(f"Filtered by severity: {escape(severity)}")
+        output.print(f"Filtered by severity: {', '.join(severity)}")
     output.print()
 
     if not cves:
@@ -827,6 +936,8 @@ def bundle_create(ctx, path: str, no_redhat: bool, no_crunchy: bool):
         )
         if exc.source == "Red Hat":
             console.print("Retry later, or use --no-redhat to build a bundle without Red Hat records.")
+        elif exc.source == crunchy.SOURCE:
+            console.print("Retry later, set GITHUB_TOKEN, or use --no-crunchy to build a bundle without them.")
         ctx.exit(EXIT_ERROR)
     _print_bundle(created)
     output.print(f"\nCopy it to the offline machine, check the SHA-256 there, then run commands with --data {escape(path)}")
