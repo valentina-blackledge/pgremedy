@@ -1,4 +1,15 @@
-"""Remediation guidance generator."""
+"""Remediation guidance for a CVE.
+
+For a PostgreSQL server CVE the fix is a minor-release upgrade. Minor releases
+are cumulative, so the advice points at the latest release of the user's
+branch, which includes the fix and every other one released since, rather than
+the first release that fixed this CVE. End-of-life branches get no fixes, so
+they are flagged instead.
+
+Workarounds are shown only when a vendor documents one (Red Hat's mitigation
+field). pgremedy doesn't guess them from the CVE description: generic advice
+matched on keywords was often irrelevant and sometimes harmful.
+"""
 
 from __future__ import annotations
 
@@ -6,134 +17,194 @@ from typing import Any
 
 from rich.console import Console
 
-from pgremedy.apis import crunchy, nvd, redhat
+from pgremedy import branches, pgversion
+from pgremedy.apis import crunchy, nvd, postgresql_org, redhat
+from pgremedy.branches import BranchStatus
 from pgremedy.errors import SourceUnavailable
+from pgremedy.models import (
+    BranchFix,
+    CrunchyInfo,
+    Finding,
+    Mitigation,
+    RemediationReport,
+    VersionAdvice,
+)
 
 console = Console(stderr=True)
 
-KNOWN_MITIGATIONS: dict[str, list[str]] = {
-    "search_path": [
-        "Set search_path explicitly in postgresql.conf: search_path = '\"$user\", public'",
-        "Use fully-qualified table/function names in application SQL",
-        "Revoke CREATE on public schema from PUBLIC: REVOKE CREATE ON SCHEMA public FROM PUBLIC",
-    ],
-    "pg_hba": [
-        "Restrict pg_hba.conf to reject untrusted connections",
-        "Use scram-sha-256 instead of md5 for password authentication",
-        "Limit hostssl entries to specific IP ranges",
-    ],
-    "row_security": [
-        "Enable row-level security on affected tables: ALTER TABLE t ENABLE ROW LEVEL SECURITY",
-        "Audit existing RLS policies for bypass conditions",
-    ],
-    "privilege_escalation": [
-        "Revoke unnecessary superuser grants",
-        "Audit SECURITY DEFINER functions: SELECT proname, proowner FROM pg_proc WHERE prosecdef",
-        "Use SECURITY INVOKER where possible",
-    ],
-    "ssl": [
-        "Enforce ssl=on in postgresql.conf",
-        "Set ssl_min_protocol_version = 'TLSv1.2'",
-        "Rotate server certificates if private key may be compromised",
-    ],
-    "extension": [
-        "Drop or upgrade the affected extension",
-        "Restrict extension installation: ALTER SYSTEM SET shared_preload_libraries (review list)",
-        "Limit CREATE EXTENSION privileges to trusted roles",
-    ],
-}
-
-KEYWORD_TO_MITIGATION: list[tuple[list[str], str]] = [
-    (["search_path", "search path"], "search_path"),
-    (["pg_hba", "authentication", "password", "md5", "scram"], "pg_hba"),
-    (["row level security", "row-level security", "rls", "policy"], "row_security"),
-    (["privilege", "superuser", "escalation", "security definer"], "privilege_escalation"),
-    (["ssl", "tls", "certificate", "x509"], "ssl"),
-    (["extension", "contrib", "shared_preload"], "extension"),
-]
+ADVISORY_URL = "https://www.postgresql.org/support/security/{cve_id}/"
 
 
-def _match_mitigations(description: str) -> list[str]:
-    desc_lower = description.lower()
-    mitigations: list[str] = []
-    seen_categories: set[str] = set()
-    for keywords, category in KEYWORD_TO_MITIGATION:
-        if category in seen_categories:
-            continue
-        for kw in keywords:
-            if kw in desc_lower:
-                mitigations.extend(KNOWN_MITIGATIONS[category])
-                seen_categories.add(category)
-                break
-    return mitigations
+def generate_remediation(cve_id: str, pg_version: str | None = None) -> RemediationReport | None:
+    """Remediation for a CVE, or None if NVD has no record of it.
 
-
-def generate_remediation(cve_id: str, pg_version: str | None = None) -> dict[str, Any]:
-    """Remediation steps for a CVE. Raises SourceUnavailable if NVD can't be reached."""
+    Raises SourceUnavailable if NVD or postgresql.org can't be reached. Red Hat
+    and Crunchy are secondary: their failures are recorded in source_errors.
+    """
     console.log(f"Generating remediation for {cve_id}...")
-
     nvd_data = nvd.fetch_cve(cve_id)
-    if not nvd_data:
-        return {"cve_id": cve_id, "error": f"NVD has no record of {cve_id}"}
+    if nvd_data is None:
+        return None
+    versions = postgresql_org.fetch_versions()
 
-    description = nvd.english_description(nvd_data)
     cvss = nvd.extract_cvss(nvd_data)
-    fix_version = nvd.find_fix_version(nvd_data, pg_version=pg_version)
+    report = RemediationReport(
+        cve_id=cve_id,
+        description=nvd.english_description(nvd_data),
+        severity=(cvss.get("severity") or "UNKNOWN").upper(),
+        cvss_score=cvss.get("score"),
+        nvd_status=nvd_data.get("vulnStatus"),
+    )
 
-    result: dict[str, Any] = {
-        "cve_id": cve_id,
-        "description": description,
-        "severity": cvss.get("severity", "UNKNOWN"),
-        "cvss_score": cvss.get("score"),
-    }
+    if not nvd.has_affected_data(nvd_data):
+        report.scope = "not-analyzed"
+        if nvd.detect_type(nvd_data) == "postgresql":
+            report.advisory_url = ADVISORY_URL.format(cve_id=cve_id)
+    elif nvd.lists_postgresql_server(nvd_data):
+        report.scope = "postgresql-server"
+        report.advisory_url = ADVISORY_URL.format(cve_id=cve_id)
+        report.branches = _branch_table(nvd_data, versions)
+    else:
+        report.scope = "other-products"
+        report.other_products = nvd.affected_products(nvd_data)
 
-    if fix_version:
-        upgrade_info: dict[str, Any] = {
-            "fix_version": fix_version,
-            "action": f"Upgrade PostgreSQL to {fix_version} or later",
-        }
-        if pg_version:
-            upgrade_info["current"] = pg_version
-            from packaging.version import Version, InvalidVersion
-            try:
-                if Version(pg_version) >= Version(fix_version):
-                    upgrade_info["action"] = f"Your version ({pg_version}) already includes the fix (fixed in {fix_version})"
-            except InvalidVersion:
-                pass
-        result["upgrade_path"] = upgrade_info
+    if pg_version:
+        report.advice = _advise(nvd_data, pg_version, versions, report)
 
-    mitigations = _match_mitigations(description)
-    if not mitigations and not fix_version:
-        mitigations.append("No automated mitigation available — review the CVE description and upstream advisory for manual workarounds")
-    result["mitigations"] = mitigations
+    _add_vendor_data(report)
+    return report
 
-    source_errors: dict[str, str] = {}
+
+def _branch_table(nvd_data: dict, versions: list[dict[str, Any]]) -> list[BranchFix]:
+    """Every branch NVD lists as affected, plus every supported branch."""
+    rows = []
+    for entry in versions:
+        major = str(entry["major"])
+        match = nvd.check_branch(nvd_data, major)
+        if not match.affected and not entry.get("supported"):
+            continue
+        rows.append(BranchFix(
+            major=major,
+            affected=match.affected,
+            fixed_in=match.fixed_in,
+            latest=f"{major}.{entry['latestMinor']}",
+            supported=bool(entry.get("supported")),
+            eol_date=entry.get("eolDate"),
+        ))
+    rows.sort(key=lambda row: pgversion.parse(row.major))
+    return rows
+
+
+def _advise(nvd_data: dict, version: str, versions: list[dict[str, Any]], report: RemediationReport) -> VersionAdvice:
+    status = branches.branch_status(version, versions)
+    advice = VersionAdvice(version=version, major=status.major)
+
+    def add(level: str, message: str) -> None:
+        advice.findings.append(Finding(level, message))
+
+    if report.scope == "other-products":
+        advice.affected = False
+        add("ok", "This CVE is in another product, not the PostgreSQL server, so the server version doesn't matter.")
+        return advice
+
+    if report.scope == "not-analyzed":
+        add("warning", (
+            f"NVD hasn't recorded which versions this CVE affects yet (status: {report.nvd_status or 'unknown'}), "
+            f"so pgremedy can't tell whether {version} is affected."
+        ))
+        if not _add_upgrade(advice, status, fix=None, reason="it includes every fix released so far") and status.latest:
+            add("info", f"{version} is the {_latest_word(status)} {status.major}.x release.")
+        advice.findings += [Finding(level, msg) for level, msg in branches.eol_findings(status)]
+        return advice
+
+    match = nvd.check_version(nvd_data, version)
+    branch = nvd.check_branch(nvd_data, status.major)
+    advice.fixed_in = match.fixed_in or branch.fixed_in
+    fix = advice.fixed_in
+    current = pgversion.parse(version)
+
+    if match.affected:
+        advice.affected = True
+        if fix:
+            add("critical", f"Affected. The fix first shipped in {fix}.")
+        else:
+            add("critical", f"Affected. NVD doesn't list a fixed {status.major}.x release.")
+        if not _add_upgrade(advice, status, fix):
+            add("warning", (
+                f"{version} is already the {_latest_word(status)} {status.major}.x release, and NVD still lists it "
+                "as affected. Check the advisory for a workaround or an upcoming fix."
+            ))
+    elif fix and current is not None and current >= pgversion.parse(fix):
+        advice.affected = False
+        add("ok", f"Not affected: {version} already includes the fix (first shipped in {fix}).")
+        _add_behind_note(advice, status)
+    elif status.is_eol:
+        add("warning", (
+            f"NVD doesn't list {status.major}.x for this CVE, but that doesn't mean {version} is safe: "
+            "advisories only cover supported branches."
+        ))
+    elif not status.known:
+        add("warning", (
+            f"NVD doesn't list {version} as affected, but PostgreSQL {status.major} isn't in postgresql.org's "
+            "release list, so that can't be confirmed."
+        ))
+    else:
+        advice.affected = False
+        add("ok", f"Not affected: NVD doesn't list {version} as affected.")
+        _add_behind_note(advice, status)
+
+    advice.findings += [Finding(level, msg) for level, msg in branches.eol_findings(status)]
+    return advice
+
+
+def _latest_word(status: BranchStatus) -> str:
+    return "last" if status.is_eol else "latest"
+
+
+def _add_upgrade(advice: VersionAdvice, status: BranchStatus, fix: str | None, reason: str | None = None) -> bool:
+    """Add the "upgrade to X" step. False if the version is already at or past every target."""
+    targets = [v for v in (pgversion.parse(status.latest), pgversion.parse(fix)) if v is not None]
+    if not targets:
+        return False
+    target = max(targets)
+    current = pgversion.parse(advice.version)
+    if current is not None and current >= target:
+        return False
+    advice.upgrade_to = str(target)
+    if status.latest and target == pgversion.parse(status.latest):
+        message = f"Upgrade to {target}, the {_latest_word(status)} {status.major}.x release"
+    else:
+        message = f"Upgrade to {target} or later"
+    advice.findings.append(Finding("info", f"{message}{f': {reason}' if reason else ''}."))
+    return True
+
+
+def _add_behind_note(advice: VersionAdvice, status: BranchStatus) -> None:
+    n = status.minors_behind
+    if n and not status.is_eol:
+        advice.upgrade_to = status.latest
+        advice.findings.append(Finding("info", (
+            f"It is {n} minor release{'s' if n != 1 else ''} behind the latest {status.major}.x "
+            f"({status.latest}); upgrading picks up the other security fixes."
+        )))
+
+
+def _add_vendor_data(report: RemediationReport) -> None:
+    try:
+        rh = redhat.fetch_cve(report.cve_id)
+    except SourceUnavailable as exc:
+        report.source_errors["redhat"] = exc.reason
+    else:
+        if rh:
+            report.redhat = redhat.to_info(rh)
+            text = redhat.mitigation_text(rh)
+            if text:
+                report.mitigations.append(Mitigation(source="Red Hat", text=text))
 
     try:
-        rh = redhat.fetch_cve(cve_id)
+        cr = crunchy.find_cve_in_releases(report.cve_id, crunchy.fetch_releases())
     except SourceUnavailable as exc:
-        source_errors["redhat"] = exc.reason
-        rh = None
-    if rh:
-        rh_status: dict[str, Any] = {
-            "fix_state": rh.get("fix_state", "Unknown"),
-            "upstream_fix": rh.get("upstream_fix"),
-        }
-        patches = []
-        for ar in rh.get("affected_release", [])[:5]:
-            patches.append(f"{ar.get('package', 'N/A')} via {ar.get('advisory', 'N/A')}")
-        if patches:
-            rh_status["patches"] = patches
-        result["redhat_status"] = rh_status
-
-    try:
-        cr = crunchy.find_cve_in_releases(cve_id, crunchy.fetch_releases())
-    except SourceUnavailable as exc:
-        source_errors["crunchy"] = exc.reason
-        cr = None
-    if cr:
-        result["crunchy_status"] = cr
-
-    if source_errors:
-        result["source_errors"] = source_errors
-    return result
+        report.source_errors["crunchy"] = exc.reason
+    else:
+        if cr:
+            report.crunchy = CrunchyInfo(**cr)

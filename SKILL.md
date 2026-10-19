@@ -66,9 +66,11 @@ uv run --project <SKILL_DIR> python -m pgremedy scan "<CONNECTION-STRING>" [--se
 Connects to a live Postgres instance and reads its version. Checks that version against postgresql.org: is it the latest minor release, and is the branch end-of-life? Then lists the NVD CVEs that apply, with the fixing release.
 
 **Connection string formats:**
-- `postgresql://user:pass@host:port/dbname`
+- `postgresql://user@host:port/dbname`
 - `host=x port=5432 dbname=y user=z`
 - `service=myservice` (from pg_service.conf)
+
+Never put a password in the connection string, and don't ask the user to paste one into the chat. It would end up in shell history and in this conversation. The password should come from the user's `~/.pgpass` or service file. Alternatively, ask the user to run the command themselves with `-W`, which prompts for it.
 
 **When:** User wants to check a running instance for vulnerabilities.
 
@@ -78,11 +80,9 @@ Connects to a live Postgres instance and reads its version. Checks that version 
 uv run --project <SKILL_DIR> python -m pgremedy remedy <CVE-ID> [--pg-version 16.2] [--format table|json]
 ```
 
-For a given CVE, generates:
-1. **Upgrade path** — which version fixes it
-2. **Config mitigations** — pg_hba.conf changes, GUC settings, workarounds
-3. **Red Hat patch status** — backport info
-4. **Crunchy Data status** — PGO release info
+With `--pg-version` (a full release like 16.2, not 16): whether that release is affected, when the fix first shipped, and the release to upgrade to (always the latest of its branch). It flags end-of-life branches. Without it: a per-branch table of fixed and latest releases.
+
+Workarounds come only from vendor-documented sources (Red Hat's mitigation text). If none is shown, upgrading is the fix: don't invent configuration workarounds. The output also says when a CVE is about another product (e.g. a driver) or hasn't been analyzed by NVD yet, and links the PostgreSQL advisory.
 
 **When:** User wants to know how to fix a specific CVE.
 
@@ -126,7 +126,7 @@ If the output says the branch is end-of-life, lead with that. NVD has no affecte
 ## Stopping Points
 
 - After presenting audit/scan results: Ask if user wants details on specific CVEs
-- If Critical/High CVE with no patch: Warn and suggest mitigations
+- If Critical/High CVE with no patch: Warn, and pass on only the workarounds `remedy` shows
 - For base image CVEs: Note whether Crunchy has consumed the Red Hat fix
 
 ## Troubleshooting

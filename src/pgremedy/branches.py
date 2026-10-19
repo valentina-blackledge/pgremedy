@@ -17,6 +17,10 @@ from pgremedy import pgversion
 EOL_WARNING_DAYS = 90
 
 
+def _today() -> date:
+    return date.today()       # replaced in tests so results don't depend on the calendar
+
+
 @dataclass
 class BranchStatus:
     major: str
@@ -40,7 +44,7 @@ def _latest_release(entry: dict[str, Any]) -> str:
 
 def branch_status(version_or_major: str, versions: list[dict[str, Any]], today: date | None = None) -> BranchStatus:
     """Look up a release ("16.4") or a branch ("16") in postgresql.org's version list."""
-    today = today or date.today()
+    today = today or _today()
     major = pgversion.major_of(version_or_major) or version_or_major
     supported_majors = [str(e["major"]) for e in versions if e.get("supported")]
     entry = next((e for e in versions if str(e.get("major")) == major), None)
@@ -80,17 +84,7 @@ def assess(status: BranchStatus) -> list[tuple[str, str]]:
         ))]
 
     if status.is_eol:
-        upgrade_to = ", ".join(status.supported_majors) or "a supported version"
-        return [
-            ("critical", (
-                f"PostgreSQL {status.major} reached end-of-life on {status.eol_date} and no longer "
-                f"receives security fixes. Upgrade to a supported major version ({upgrade_to})."
-            )),
-            ("info", (
-                "Advisories only cover supported branches, so CVEs published after "
-                f"{status.eol_date} won't be listed here even when they affect this version."
-            )),
-        ]
+        return eol_findings(status)
 
     findings: list[tuple[str, str]] = []
     if status.version and status.minors_behind:
@@ -105,10 +99,29 @@ def assess(status: BranchStatus) -> list[tuple[str, str]]:
     else:
         findings.append(("info", f"Latest {status.major}.x release: {status.latest}."))
 
+    return findings + eol_findings(status)
+
+
+def eol_findings(status: BranchStatus) -> list[tuple[str, str]]:
+    """End-of-life findings only: reached (critical, plus why NVD can't help) or coming within 90 days."""
+    if not status.known:
+        return []
+    if status.is_eol:
+        upgrade_to = ", ".join(status.supported_majors) or "a supported version"
+        return [
+            ("critical", (
+                f"PostgreSQL {status.major} reached end-of-life on {status.eol_date} and no longer "
+                f"receives security fixes. Upgrade to a supported major version ({upgrade_to})."
+            )),
+            ("info", (
+                "Advisories only cover supported branches, so CVEs published after "
+                f"{status.eol_date} won't be listed here even when they affect this version."
+            )),
+        ]
     if status.days_to_eol is not None and 0 <= status.days_to_eol <= EOL_WARNING_DAYS:
         days = status.days_to_eol
-        findings.append(("warning", (
+        return [("warning", (
             f"PostgreSQL {status.major} reaches end-of-life on {status.eol_date} "
             f"(in {days} day{'s' if days != 1 else ''}). Plan the upgrade to a newer major version."
-        )))
-    return findings
+        ))]
+    return []
